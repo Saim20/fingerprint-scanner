@@ -20,7 +20,7 @@
 esp_err_t app_fp_init(void);
 bool app_fp_is_ready(void);
 
-#define APP_FP_ENROLL_MAX_TRIES 25
+#define APP_FP_ENROLL_MAX_TRIES 5
 
 /** User-facing enroll steps (ENROLL1 → ENROLL2 → ENROLL3). */
 #define APP_FP_ENROLL_STEPS 3
@@ -37,10 +37,10 @@ esp_err_t app_fp_enroll(uint16_t slot_id);
 /** One capture (0..APP_FP_ENROLL_CAPTURES-1). */
 esp_err_t app_fp_enroll_capture(uint16_t slot_id, int capture_idx);
 
-/** Legacy 3-step API (maps to captures 0, 1, 5). */
+/** Single enroll step (1..3): ENROLL1, ENROLL2, or ENROLL3 directly. */
 esp_err_t app_fp_enroll_step(uint16_t slot_id, int step);
 
-/** One ENROLL1/2/3 command per step (bare-minimum 3-scan path). */
+/** Alias for app_fp_enroll_step (GPIO1 bare test). */
 esp_err_t app_fp_enroll_legacy_step(uint16_t slot_id, int step);
 
 /** 1:N search; sets *matched and *out_id on success. */

@@ -29,8 +29,6 @@
 #define FP_CMD_SEARCH      0x0C
 #define FP_CMD_GET_IMAGE   0x23
 #define FP_CMD_SET_TIMEOUT 0x2E
-#define FP_CMD_COMPARE_LV  0x28
-
 /*
  * Capture-timeout reg (CMD 0x2E). Module multiplies by T0 (~0.2-0.3 s) to get
  * per-capture wait window. Earlier firmware revisions wrote 0 here, which the
@@ -38,7 +36,6 @@
  * 25 = ~5-7 s per capture, matches the docs default and works for human reaction.
  */
 #define FP_DEFAULT_CAPTURE_TOUT 25
-#define FP_DEFAULT_COMPARE_LEVEL 5
 
 #define FP_ACK_SUCCESS     0x00
 #define FP_ACK_FAIL        0x01
@@ -158,7 +155,6 @@ static uint8_t fp_check_package(uint8_t cmd)
     case FP_CMD_DELETE:
     case FP_CMD_CLEAR:
     case FP_CMD_SET_TIMEOUT:
-    case FP_CMD_COMPARE_LV:
         if (s_rx_buf[4] == FP_ACK_SUCCESS) {
             return FP_ACK_SUCCESS;
         }
@@ -280,6 +276,10 @@ static esp_err_t fp_run_cmd_timeout(uint8_t cmd, uint16_t arg, uint8_t arg_byte3
         ESP_LOGD(FP_TAG, "SEARCH no match frame");
         ESP_LOG_BUFFER_HEX_LEVEL(FP_TAG, s_rx_buf, FP_FRAME_LEN, ESP_LOG_DEBUG);
         return ESP_ERR_NOT_FOUND;
+    }
+    if (cmd == FP_CMD_IDENTIFY && (ack == FP_ACK_NOUSER || ack == FP_ACK_FAIL)) {
+        ESP_LOGD(FP_TAG, "IDENTIFY empty slot ack=0x%02x", ack);
+        return ESP_FAIL;
     }
 
     fp_log_last_frame("cmd");
@@ -512,13 +512,6 @@ esp_err_t app_fp_init(void)
             ESP_LOGW(FP_TAG, "capture timeout write failed (ack=0x%02x) — module may stay stuck",
                      s_last_ack);
         }
-        esp_err_t cmp_err = fp_run_cmd_timeout(FP_CMD_COMPARE_LV, FP_DEFAULT_COMPARE_LEVEL, 0, 2000,
-                                               true);
-        if (cmp_err == ESP_OK) {
-            ESP_LOGI(FP_TAG, "compare level set to %u", FP_DEFAULT_COMPARE_LEVEL);
-        } else {
-            ESP_LOGW(FP_TAG, "compare level set failed (ack=0x%02x)", s_last_ack);
-        }
         xSemaphoreGive(s_lock);
     }
 
@@ -604,10 +597,18 @@ esp_err_t app_fp_alloc_enroll_slot(uint16_t *out_slot)
         if ((s_slot_bitmap[bit / 8] & (uint8_t)(1u << (bit % 8))) != 0) {
             continue;
         }
+        /* Trust NVS bitmap — do not IDENTIFY before enroll (extra UART confuses session). */
+        *out_slot = slot;
+        xSemaphoreGive(s_lock);
+        ESP_LOGI(FP_TAG, "alloc enroll slot %u (free)", (unsigned)*out_slot);
+        return ESP_OK;
+    }
+
+    for (uint16_t slot = APP_FP_MIN_USER_ID; slot <= APP_FP_MAX_USER_ID; slot++) {
         if (!fp_slot_occupied_probe_locked(slot)) {
             *out_slot = slot;
             xSemaphoreGive(s_lock);
-            ESP_LOGI(FP_TAG, "alloc enroll slot %u (free)", (unsigned)*out_slot);
+            ESP_LOGI(FP_TAG, "alloc enroll slot %u (probed free)", (unsigned)*out_slot);
             return ESP_OK;
         }
         fp_slot_set_locked(slot, true);
@@ -738,7 +739,7 @@ esp_err_t app_fp_enroll(uint16_t slot_id)
             return err;
         }
     }
-    return ESP_OK;
+    return app_fp_mark_slot_enrolled(slot_id);
 }
 
 esp_err_t app_fp_identify(uint16_t slot_id)

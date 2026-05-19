@@ -194,7 +194,7 @@ static bool run_enroll(uint16_t slot_id)
     esp_err_t err = ESP_OK;
     for (int step = 1; step <= APP_FP_ENROLL_STEPS && err == ESP_OK; step++) {
         msg_user("[ENROLL] Step %d/%d — press flat, HOLD 3-5 sec\n", step, APP_FP_ENROLL_STEPS);
-        msg_user("           Lift between steps; retries ~25s\n");
+        msg_user("           Lift between steps; up to %d tries\n", APP_FP_ENROLL_MAX_TRIES);
         app_oled_show_lines("ENROLL", "Hold finger", "", "");
         err = app_fp_enroll_step(slot_id, step);
         if (err == ESP_OK) {
@@ -416,7 +416,8 @@ static void run_pending_cloud_command(void)
             return;
         }
         msg_user("[CLOUD] Enroll %s → module slot %u (auto)\n", who, (unsigned)slot);
-        /* Clear partial/failed enroll so ENROLL2 does not stay stuck. */
+        /* Always clear — no IDENTIFY probe (extra UART breaks enroll). */
+        msg_user("[CLOUD] Clearing slot %u before enroll\n", (unsigned)slot);
         (void)app_fp_clear_slot(slot);
         vTaskDelay(pdMS_TO_TICKS(150));
         if (run_enroll(slot)) {

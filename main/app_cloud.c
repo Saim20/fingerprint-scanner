@@ -454,6 +454,10 @@ static void parse_sync(const char *json, app_cloud_sync_t *out)
 
 static int build_sync_body(char *body, size_t body_len)
 {
+    if (s_busy) {
+        return -1;
+    }
+
     uint8_t fp_count = 0;
     if (app_fp_get_user_count(&fp_count) != ESP_OK) {
         fp_count = app_fp_stored_count();
@@ -651,6 +655,12 @@ static void cloud_worker_task(void *arg)
         bool force_sync = s_sync_requested;
         if (force_sync) {
             s_sync_requested = false;
+        }
+
+        /* Enroll/search hold the FP mutex in bursts; sync must not IDENTIFY/rebuild mid-session. */
+        if (s_busy) {
+            vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+            continue;
         }
 
         app_cloud_sync_t *sync = &s_sync;
