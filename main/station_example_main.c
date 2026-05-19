@@ -18,6 +18,7 @@
 #include "app_fingerprint.h"
 #include "app_oled.h"
 #include "app_wifi.h"
+#include "app_cloud.h"
 
 static const char *TAG = "attendance";
 
@@ -27,6 +28,9 @@ typedef enum {
     ACT_TOGGLE_AUTO,
     ACT_DELETE_LAST,
     ACT_CLEAR_ALL,
+    ACT_CLOUD_ADD,
+    ACT_CLOUD_SCAN,
+    ACT_CLOUD_DELETE,
 } action_t;
 
 static bool s_fp_ok;
@@ -38,6 +42,7 @@ static uint16_t s_last_enrolled_id;
 static bool s_has_enrolled;
 static volatile bool s_startup_done;
 static QueueHandle_t s_action_q;
+static app_cloud_sync_t s_cloud_cmd;
 
 /** Visible in idf.py monitor (OLED may be off). */
 static void msg_user(const char *fmt, ...)
@@ -206,6 +211,12 @@ static void handle_match(uint16_t user_id)
     s_last_enrolled_id = user_id;
     s_has_enrolled = true;
     msg_user("[SCAN] MATCH — welcome, ID %u\n", (unsigned)user_id);
+    if (app_cloud_is_configured()) {
+        esp_err_t cr = app_cloud_report_scan(user_id);
+        if (cr != ESP_OK) {
+            msg_user("[CLOUD] scan report failed: %s\n", esp_err_to_name(cr));
+        }
+    }
     app_oled_show_lines("MATCH", "OK", "", "");
     app_buzzer_beep_ok();
     vTaskDelay(pdMS_TO_TICKS(1500));
@@ -253,6 +264,27 @@ static void run_scan_once(void)
         handle_no_match();
     } else {
         msg_user("[SCAN] Error: %s\n", esp_err_to_name(err));
+    }
+}
+
+static void run_delete_slot(uint16_t slot_id)
+{
+    if (!s_fp_ok) {
+        msg_user("[DELETE] module not ready\n");
+        return;
+    }
+    if (app_fp_delete(slot_id) == ESP_OK) {
+        msg_user("[DELETE] Removed slot %u\n", (unsigned)slot_id);
+        sync_template_count();
+        app_buzzer_beep_ok();
+    } else {
+        msg_user("[DELETE] Failed slot %u", (unsigned)slot_id);
+        if (app_fp_last_ack() != 0) {
+            msg_user(" (%s)\n", app_fp_ack_str(app_fp_last_ack()));
+        } else {
+            msg_user("\n");
+        }
+        app_buzzer_beep_deny();
     }
 }
 
@@ -360,6 +392,25 @@ static void post_action(action_t act)
     s_action_pending = true;
 }
 
+static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx)
+{
+    (void)ctx;
+    if (cmd == NULL || !cmd->valid || s_busy) {
+        return;
+    }
+    memcpy(&s_cloud_cmd, cmd, sizeof(s_cloud_cmd));
+
+    if (strcmp(cmd->desired_mode, "add") == 0) {
+        post_action(ACT_CLOUD_ADD);
+    } else if (strcmp(cmd->desired_mode, "scan") == 0) {
+        post_action(ACT_CLOUD_SCAN);
+    } else if (strcmp(cmd->desired_mode, "delete") == 0) {
+        post_action(ACT_CLOUD_DELETE);
+    } else if (strcmp(cmd->desired_mode, "idle") == 0) {
+        app_cloud_ack(cmd->command_seq);
+    }
+}
+
 static void on_button(app_btn_id_t btn, bool long_press, void *ctx)
 {
     (void)ctx;
@@ -404,6 +455,7 @@ static void ui_worker_task(void *arg)
         bool was_auto = s_auto_scan;
         s_auto_scan = false;
         s_busy = true;
+        app_cloud_set_busy(true);
 
         switch (act) {
         case ACT_ENROLL_NEXT:
@@ -419,6 +471,7 @@ static void ui_worker_task(void *arg)
             msg_user("[AUTO] Background scan %s\n", s_auto_scan ? "ON" : "OFF");
             show_idle_screen();
             s_busy = false;
+            app_cloud_set_busy(false);
             continue;
         case ACT_DELETE_LAST:
             run_delete_last();
@@ -426,11 +479,43 @@ static void ui_worker_task(void *arg)
         case ACT_CLEAR_ALL:
             run_clear_all();
             break;
+        case ACT_CLOUD_ADD: {
+            uint16_t slot = s_cloud_cmd.desired_fp_slot;
+            if (slot < APP_FP_MIN_USER_ID || slot > APP_FP_MAX_USER_ID) {
+                slot = s_next_enroll_id;
+            }
+            msg_user("[CLOUD] Remote enroll slot %u for %s\n", (unsigned)slot,
+                     s_cloud_cmd.person_display_name[0] ? s_cloud_cmd.person_display_name
+                                                        : s_cloud_cmd.desired_person_id);
+            app_oled_show_lines("Cloud ADD", s_cloud_cmd.person_display_name, "", "");
+            if (run_enroll(slot)) {
+                if (s_cloud_cmd.desired_person_id[0] != '\0') {
+                    app_cloud_report_enroll_done(slot, s_cloud_cmd.desired_person_id);
+                }
+                app_cloud_ack(s_cloud_cmd.command_seq);
+            }
+            break;
+        }
+        case ACT_CLOUD_SCAN:
+            msg_user("[CLOUD] Remote scan\n");
+            run_scan_once();
+            app_cloud_ack(s_cloud_cmd.command_seq);
+            break;
+        case ACT_CLOUD_DELETE: {
+            uint16_t slot = s_cloud_cmd.desired_fp_slot;
+            if (slot >= APP_FP_MIN_USER_ID && slot <= APP_FP_MAX_USER_ID) {
+                msg_user("[CLOUD] Remote delete slot %u\n", (unsigned)slot);
+                run_delete_slot(slot);
+            }
+            app_cloud_ack(s_cloud_cmd.command_seq);
+            break;
+        }
         default:
             break;
         }
 
         s_busy = false;
+        app_cloud_set_busy(false);
         s_auto_scan = was_auto;
     }
 }
@@ -495,6 +580,8 @@ static void print_help(void)
     msg_user("  buttons        - show button GPIO levels\n");
     msg_user("  count          - templates stored in module\n");
     msg_user("  oled           - scan I2C for OLED (debug wiring)\n");
+    msg_user("  provision KEY  - save Supabase device API key (NVS)\n");
+    msg_user("  cloudurl URL   - set Supabase base URL (NVS)\n");
     msg_user("  help           - this message\n");
     msg_user("\nButtons (C3 Super Mini): GPIO0=enroll GPIO1=scan GPIO2=auto GPIO3=delete\n");
     msg_user("         type 'buttons' to test wiring\n\n");
@@ -607,6 +694,30 @@ static void handle_serial_line(char *line)
         s_busy = false;
     } else if (strcmp(cmd, "oled") == 0) {
         app_oled_diag();
+    } else if (strcmp(cmd, "provision") == 0) {
+        char *arg = strtok(NULL, " \t\r\n");
+        if (arg == NULL || strlen(arg) < 16) {
+            msg_user("usage: provision <device_api_key>\n");
+            return;
+        }
+        esp_err_t err = app_cloud_provision(arg);
+        if (err == ESP_OK) {
+            msg_user("[CLOUD] API key saved to NVS\n");
+            if (app_cloud_is_configured()) {
+                app_cloud_start_task(on_cloud_command, NULL);
+            }
+        } else {
+            msg_user("[CLOUD] provision failed: %s\n", esp_err_to_name(err));
+        }
+    } else if (strcmp(cmd, "cloudurl") == 0) {
+        char *arg = strtok(NULL, " \t\r\n");
+        if (arg == NULL) {
+            msg_user("usage: cloudurl https://YOUR_REF.supabase.co\n");
+            return;
+        }
+        esp_err_t err = app_cloud_set_url(arg);
+        msg_user(err == ESP_OK ? "[CLOUD] URL saved\n" : "[CLOUD] URL save failed: %s\n",
+                 esp_err_to_name(err));
     } else {
         msg_user("unknown: %s (try help)\n", cmd);
     }
@@ -676,7 +787,9 @@ static void attendance_task(void *arg)
             esp_err_t err = app_fp_search(&user_id, &matched);
             if (err == ESP_OK && matched) {
                 s_busy = true;
+                app_cloud_set_busy(true);
                 handle_match(user_id);
+                app_cloud_set_busy(false);
                 s_busy = false;
             } else {
                 vTaskDelay(pdMS_TO_TICKS(400));
@@ -733,6 +846,15 @@ void app_main(void)
     }
 
     app_buttons_init(on_button, NULL);
+
+    app_cloud_init();
+    if (app_cloud_is_configured()) {
+        if (app_cloud_start_task(on_cloud_command, NULL) != ESP_OK) {
+            msg_user("[CLOUD] failed to start sync task\n");
+        }
+    } else {
+        msg_user("[CLOUD] not configured — use menuconfig or: provision / cloudurl\n");
+    }
 
     xTaskCreate(ui_worker_task, "ui_worker", 4096, NULL, 5, NULL);
     xTaskCreate(startup_task, "startup", 4096, NULL, 5, NULL);

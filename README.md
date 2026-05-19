@@ -1,7 +1,32 @@
 | Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
 | ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | -------- | -------- | -------- |
 
-# Wi-Fi Station Example
+# Fingerprint attendance (ESP32-C3 + Supabase)
+
+ESP32-C3 fingerprint scanner with OLED, buzzer, local enroll/scan, and optional **Supabase** cloud sync (remote enroll, attendance events, admin web UI).
+
+## Cloud stack (same Supabase project)
+
+1. **Database + Edge Function** — [`supabase/README.md`](supabase/README.md)
+   - `supabase link --project-ref YOUR_REF`
+   - `supabase db push`
+   - `supabase functions deploy device-api`
+2. **Web admin** — [`web/README.md`](web/README.md) — `cd web && npm install && npm run dev`
+3. **ESP32** — menuconfig: WiFi + `Cloud Supabase URL`, or serial:
+   - `cloudurl https://YOUR_REF.supabase.co`
+   - `provision <device_api_key>` (from web UI when creating a device)
+
+## End-to-end test
+
+1. Sign in to the web app; create a **person** and a **device**; copy the API key.
+2. Flash the ESP; set WiFi in menuconfig; run `provision` + `cloudurl` on serial.
+3. On the device page, click **Start remote enroll** for that person; complete 3 scans on the sensor.
+4. Open **Attendance** — confirm enroll/scan events appear (Realtime).
+5. Scan again locally — a `scan` row should appear with the mapped person.
+
+---
+
+# Wi-Fi Station Example (upstream)
 
 (See the README.md file in the upper level 'examples' directory for more information about examples.)
 

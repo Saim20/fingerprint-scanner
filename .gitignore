@@ -32,6 +32,16 @@ flasher_args.json # Generated in build directory
 sdkconfig.old
 sdkconfig
 
+# Web admin
+web/node_modules/
+web/.next/
+web/.env.local
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/

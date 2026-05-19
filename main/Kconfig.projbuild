@@ -66,4 +66,16 @@ menu "Example Configuration"
             bool "WAPI PSK"
     endchoice
 
+    config CLOUD_SUPABASE_URL
+        string "Supabase project URL (https://xxx.supabase.co)"
+        default ""
+        help
+            Base URL for Edge Functions. Can override via NVS (cloudurl command).
+
+    config CLOUD_DEVICE_API_KEY
+        string "Device API key (optional; prefer NVS provision)"
+        default ""
+        help
+            Plain device API key from web UI. Prefer: serial command provision KEY.
+
 endmenu
