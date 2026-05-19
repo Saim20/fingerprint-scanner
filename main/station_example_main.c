@@ -187,28 +187,21 @@ static bool run_enroll(uint16_t slot_id)
 
     msg_user("\n========================================\n");
     msg_user("  ENROLL fingerprint -> template slot %u\n", (unsigned)slot_id);
-    msg_user("  Scan the SAME finger %d times.\n", APP_FP_ENROLL_CAPTURES);
-    msg_user("  Lift right after each capture (before OK), then press again.\n");
+    msg_user("  Scan the SAME finger %d times.\n", APP_FP_ENROLL_STEPS);
+    msg_user("  Lift finger between each step.\n");
     msg_user("========================================\n\n");
 
     esp_err_t err = ESP_OK;
-    for (int cap = 0; cap < APP_FP_ENROLL_CAPTURES && err == ESP_OK; cap++) {
-        msg_user("[ENROLL] Scan %d/%d — press flat, hold until capture ends\n", cap + 1,
-                 APP_FP_ENROLL_CAPTURES);
-        msg_user("           Lift finger when done (before OK). Up to %d tries.\n",
-                 APP_FP_ENROLL_MAX_TRIES);
+    for (int step = 1; step <= APP_FP_ENROLL_STEPS && err == ESP_OK; step++) {
+        msg_user("[ENROLL] Step %d/%d — press flat, HOLD 3-5 sec\n", step, APP_FP_ENROLL_STEPS);
+        msg_user("           Lift between steps; retries ~25s\n");
         app_oled_show_lines("ENROLL", "Hold finger", "", "");
-        err = app_fp_enroll_capture(slot_id, cap);
+        err = app_fp_enroll_step(slot_id, step);
         if (err == ESP_OK) {
-            msg_user("[ENROLL] Scan %d/%d OK", cap + 1, APP_FP_ENROLL_CAPTURES);
-            if (cap + 1 < APP_FP_ENROLL_CAPTURES) {
-                msg_user(" — place same finger for next scan\n");
-            } else {
-                msg_user("\n");
-            }
+            msg_user("[ENROLL] Step %d/%d OK\n", step, APP_FP_ENROLL_STEPS);
             app_buzzer_beep_ok();
         } else {
-            msg_enroll_err(cap + 1, err);
+            msg_enroll_err(step, err);
             app_buzzer_beep_deny();
             break;
         }

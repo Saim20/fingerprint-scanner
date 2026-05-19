@@ -31,7 +31,7 @@ bool app_fp_is_ready(void);
 /** Pick next free module slot (1..150). Same strategy as button enroll in 0788220. */
 esp_err_t app_fp_alloc_enroll_slot(uint16_t *out_slot);
 
-/** Full enroll: six captures, then mark slot in NVS. */
+/** Full enroll: three steps (ENROLL1/2/3), same as working 0788220 firmware. */
 esp_err_t app_fp_enroll(uint16_t slot_id);
 
 /** One capture (0..APP_FP_ENROLL_CAPTURES-1). */
@@ -69,9 +69,6 @@ const char *app_fp_ack_str(uint8_t ack);
 
 /** Try to capture one image (0x23). ESP_OK if sensor sees a finger. */
 esp_err_t app_fp_test_sensor(void);
-
-/** After a successful capture: min lift pause before next enroll step (holds UART lock). */
-esp_err_t app_fp_wait_enroll_lift(void);
 
 /** Last known template count (updated on enroll/delete/clear/count query). */
 uint8_t app_fp_stored_count(void);

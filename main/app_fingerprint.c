@@ -1,6 +1,5 @@
 #include "app_fingerprint.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include "driver/uart.h"
@@ -74,17 +73,9 @@ static esp_err_t fp_run_cmd_timeout(uint8_t cmd, uint16_t arg, uint8_t arg_byte3
                                     bool flush_rx);
 static esp_err_t fp_run_cmd(uint8_t cmd, uint16_t arg, uint8_t arg_byte3);
 static void fp_slot_set_locked_save(uint16_t slot_id, bool occupied);
-static void fp_wait_finger_lift_locked(void);
 
-/*
- * Lift must happen right after each ENROLL ack while the module is still in that
- * capture's state — waiting before the *next* command is too late if the finger
- * stayed down through the ack. Prompt immediately; poll until off or timeout.
- */
-#define FP_LIFT_MIN_MS    1200
-#define FP_LIFT_POLL_MS   150
-#define FP_LIFT_MAX_MS    10000
-#define FP_LIFT_SETTLE_MS 350
+/** Gap between enroll steps — no UART commands here (GET_IMAGE breaks enroll state). */
+#define FP_ENROLL_GAP_MS  300
 
 static uint8_t fp_xor_checksum(uint8_t len, const uint8_t *data)
 {
@@ -589,52 +580,6 @@ esp_err_t app_fp_test_sensor(void)
     return err;
 }
 
-/** Caller holds s_lock. Finish current enroll capture: user must lift before next cmd. */
-static void fp_wait_finger_lift_locked(void)
-{
-    int elapsed_ms = 0;
-    bool saw_finger = false;
-
-    ESP_LOGI(FP_TAG, "lift now — finish this scan before next step");
-    printf("\n>>> LIFT FINGER NOW (finish this scan, before step OK) <<<\n");
-    fflush(stdout);
-
-    while (elapsed_ms < FP_LIFT_MAX_MS) {
-        esp_err_t img = fp_run_cmd_timeout(FP_CMD_GET_IMAGE, 0, 0, 800, true);
-        if (img == ESP_OK) {
-            saw_finger = true;
-        } else if (saw_finger && elapsed_ms >= FP_LIFT_MIN_MS) {
-            ESP_LOGI(FP_TAG, "finger lifted after %d ms", elapsed_ms);
-            vTaskDelay(pdMS_TO_TICKS(FP_LIFT_SETTLE_MS));
-            return;
-        } else if (!saw_finger && elapsed_ms >= FP_LIFT_MIN_MS) {
-            /* GET_IMAGE may not work on this module — still allow min time to lift */
-            ESP_LOGI(FP_TAG, "lift window done at %d ms", elapsed_ms);
-            vTaskDelay(pdMS_TO_TICKS(FP_LIFT_SETTLE_MS));
-            return;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(FP_LIFT_POLL_MS));
-        elapsed_ms += FP_LIFT_POLL_MS;
-    }
-
-    ESP_LOGW(FP_TAG, "lift wait timeout — try lifting sooner right after capture");
-    vTaskDelay(pdMS_TO_TICKS(FP_LIFT_SETTLE_MS));
-}
-
-esp_err_t app_fp_wait_enroll_lift(void)
-{
-    if (!s_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(30000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    fp_wait_finger_lift_locked();
-    xSemaphoreGive(s_lock);
-    return ESP_OK;
-}
-
 esp_err_t app_fp_alloc_enroll_slot(uint16_t *out_slot)
 {
     if (!s_ready || out_slot == NULL) {
@@ -705,10 +650,6 @@ static esp_err_t fp_enroll_cmd_locked(uint16_t slot_id, uint8_t cmd, int capture
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    if (err == ESP_OK && capture_idx + 1 < APP_FP_ENROLL_CAPTURES) {
-        fp_wait_finger_lift_locked();
-    }
-
     return err;
 }
 
@@ -731,17 +672,8 @@ esp_err_t app_fp_enroll_capture(uint16_t slot_id, int capture_idx)
 
 esp_err_t app_fp_enroll_step(uint16_t slot_id, int step)
 {
-    if (step < 1 || step > 3) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    int capture_idx = (step == 1) ? 0 : (step == 2) ? 1 : 5;
-    return app_fp_enroll_capture(slot_id, capture_idx);
-}
-
-esp_err_t app_fp_enroll_legacy_step(uint16_t slot_id, int step)
-{
     if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID || step < 1 ||
-        step > 3) {
+        step > APP_FP_ENROLL_STEPS) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -763,17 +695,25 @@ esp_err_t app_fp_enroll_legacy_step(uint16_t slot_id, int step)
         if (s_last_ack != FP_ACK_FAIL && s_last_ack != FP_ACK_TIMEOUT && err != ESP_ERR_TIMEOUT) {
             break;
         }
-        ESP_LOGI(FP_TAG, "legacy enroll step %d try %d/%d: %s", step, attempt, max_tries,
+        ESP_LOGI(FP_TAG, "enroll step %d try %d/%d: %s", step, attempt, max_tries,
                  err == ESP_ERR_TIMEOUT ? "no response" : app_fp_ack_str(s_last_ack));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    if (err == ESP_OK && step < 3) {
-        fp_wait_finger_lift_locked();
+    if (err == ESP_OK && step == APP_FP_ENROLL_STEPS) {
+        fp_refresh_count_locked();
     }
-
     xSemaphoreGive(s_lock);
+
+    if (err == ESP_OK && step < APP_FP_ENROLL_STEPS) {
+        vTaskDelay(pdMS_TO_TICKS(FP_ENROLL_GAP_MS));
+    }
     return err;
+}
+
+esp_err_t app_fp_enroll_legacy_step(uint16_t slot_id, int step)
+{
+    return app_fp_enroll_step(slot_id, step);
 }
 
 esp_err_t app_fp_mark_slot_enrolled(uint16_t slot_id)
@@ -792,21 +732,11 @@ esp_err_t app_fp_mark_slot_enrolled(uint16_t slot_id)
 
 esp_err_t app_fp_enroll(uint16_t slot_id)
 {
-    if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    for (int capture = 0; capture < APP_FP_ENROLL_CAPTURES; capture++) {
-        esp_err_t err = app_fp_enroll_capture(slot_id, capture);
+    for (int step = 1; step <= APP_FP_ENROLL_STEPS; step++) {
+        esp_err_t err = app_fp_enroll_step(slot_id, step);
         if (err != ESP_OK) {
             return err;
         }
-    }
-
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) == pdTRUE) {
-        fp_slot_set_locked_save(slot_id, true);
-        fp_refresh_count_locked();
-        xSemaphoreGive(s_lock);
     }
     return ESP_OK;
 }
