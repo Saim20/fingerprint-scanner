@@ -15,7 +15,7 @@
 #define APP_FP_PIN_RX      7
 /** FPC1020A default UART rate (set in module docs / factory config). */
 #define APP_FP_BAUD        19200
-#define APP_FP_SWAP_TX_RX  1       /* your module: TX=GPIO7 RX=GPIO4 */
+#define APP_FP_SWAP_TX_RX  0       /* your module: TX=GPIO7 RX=GPIO4 */
 
 esp_err_t app_fp_init(void);
 bool app_fp_is_ready(void);

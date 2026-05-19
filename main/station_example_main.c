@@ -17,6 +17,7 @@
 #include "app_buttons.h"
 #include "app_fingerprint.h"
 #include "app_oled.h"
+#include "app_wifi.h"
 
 static const char *TAG = "attendance";
 
@@ -464,6 +465,19 @@ static void startup_task(void *arg)
         msg_user("  auto scan OFF — type 'auto on' or press GPIO2\n\n");
     }
 
+    char ip_str[16];
+    if (app_wifi_ip_str(ip_str, sizeof(ip_str))) {
+        msg_user("[WiFi] connected (%s)\n", ip_str);
+    } else {
+        msg_user("[WiFi] not connected yet (check menuconfig SSID/password)\n");
+    }
+
+    if (app_oled_is_ready()) {
+        msg_user("[OLED] display OK\n");
+    } else {
+        msg_user("[OLED] not detected — type: oled  (scan I2C pins)\n");
+    }
+
     show_idle_screen();
     s_startup_done = true;
     vTaskDelete(NULL);
@@ -480,6 +494,7 @@ static void print_help(void)
     msg_user("  touch          - test if sensor sees your finger\n");
     msg_user("  buttons        - show button GPIO levels\n");
     msg_user("  count          - templates stored in module\n");
+    msg_user("  oled           - scan I2C for OLED (debug wiring)\n");
     msg_user("  help           - this message\n");
     msg_user("\nButtons (C3 Super Mini): GPIO0=enroll GPIO1=scan GPIO2=auto GPIO3=delete\n");
     msg_user("         type 'buttons' to test wiring\n\n");
@@ -590,6 +605,8 @@ static void handle_serial_line(char *line)
         s_busy = true;
         run_clear_all();
         s_busy = false;
+    } else if (strcmp(cmd, "oled") == 0) {
+        app_oled_diag();
     } else {
         msg_user("unknown: %s (try help)\n", cmd);
     }
@@ -672,6 +689,9 @@ static void attendance_task(void *arg)
 
 void app_main(void)
 {
+    printf("\n\n=== Fingerprint attendance boot ===\n");
+    fflush(stdout);
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -687,9 +707,15 @@ void app_main(void)
         return;
     }
 
-    bool oled_ok = app_oled_init() == ESP_OK;
-    if (oled_ok) {
-        app_oled_show_lines("ESP32-C3", "Booting...", "", "");
+    /* OLED before WiFi — avoids I2C probe spam overlapping WiFi connect logs. */
+    esp_err_t oled_err = app_oled_init();
+    if (oled_err != ESP_OK) {
+        msg_user("[BOOT] External OLED not detected (%s)\n", esp_err_to_name(oled_err));
+        msg_user("  SDA=GPIO5 SCL=GPIO6 VCC=3V3 GND=GND (not a built-in display)\n");
+    }
+
+    if (app_wifi_init() != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi init failed");
     }
 
     app_buzzer_init();
