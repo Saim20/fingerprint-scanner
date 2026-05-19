@@ -16,6 +16,7 @@
 
 #include "app_buzzer.h"
 #include "app_buttons.h"
+#include "app_fp_bare.h"
 #include "app_fingerprint.h"
 #include "app_oled.h"
 #include "app_realtime.h"
@@ -26,6 +27,7 @@ static const char *TAG = "attendance";
 
 typedef enum {
     ACT_RUN_PENDING,
+    ACT_BARE_ENROLL,
 } action_t;
 
 static bool s_fp_ok;
@@ -41,20 +43,6 @@ static int64_t s_last_notify_cmd_seq;
 
 static void show_status_screen(void);
 static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx);
-
-static uint16_t resolve_cloud_slot(uint16_t desired_slot)
-{
-    if (desired_slot >= APP_FP_MIN_USER_ID && desired_slot <= APP_FP_MAX_USER_ID) {
-        return desired_slot;
-    }
-    if (s_pending_cmd.person_external_id[0] != '\0') {
-        int n = atoi(s_pending_cmd.person_external_id);
-        if (n >= APP_FP_MIN_USER_ID && n <= APP_FP_MAX_USER_ID) {
-            return (uint16_t)n;
-        }
-    }
-    return s_next_enroll_id;
-}
 
 static bool cloud_command_needs_go(const app_cloud_sync_t *cmd)
 {
@@ -136,8 +124,7 @@ static void show_pending_screen(void)
     char line3[24];
 
     if (strcmp(mode, "add") == 0) {
-        uint16_t slot = resolve_cloud_slot(s_pending_cmd.desired_fp_slot);
-        snprintf(line3, sizeof(line3), "slot %u", (unsigned)slot);
+        snprintf(line3, sizeof(line3), "next slot %u", (unsigned)s_next_enroll_id);
         app_oled_show_lines("Press GO", "Enroll", who[0] ? who : "person", line3);
     } else if (strcmp(mode, "scan") == 0) {
         app_oled_show_lines("Press GO", "Test scan", "", "");
@@ -200,21 +187,28 @@ static bool run_enroll(uint16_t slot_id)
 
     msg_user("\n========================================\n");
     msg_user("  ENROLL fingerprint -> template slot %u\n", (unsigned)slot_id);
-    msg_user("  Scan the SAME finger 3 times.\n");
-    msg_user("  Lift finger between each step.\n");
+    msg_user("  Scan the SAME finger %d times.\n", APP_FP_ENROLL_CAPTURES);
+    msg_user("  Lift right after each capture (before OK), then press again.\n");
     msg_user("========================================\n\n");
 
     esp_err_t err = ESP_OK;
-    for (int step = 1; step <= 3 && err == ESP_OK; step++) {
-        msg_user("[ENROLL] Step %d/3 — press finger flat on sensor, HOLD 3-5 sec\n", step);
-        msg_user("           (module scans when LED is on; retries ~25s)\n");
+    for (int cap = 0; cap < APP_FP_ENROLL_CAPTURES && err == ESP_OK; cap++) {
+        msg_user("[ENROLL] Scan %d/%d — press flat, hold until capture ends\n", cap + 1,
+                 APP_FP_ENROLL_CAPTURES);
+        msg_user("           Lift finger when done (before OK). Up to %d tries.\n",
+                 APP_FP_ENROLL_MAX_TRIES);
         app_oled_show_lines("ENROLL", "Hold finger", "", "");
-        err = app_fp_enroll_step(slot_id, step);
+        err = app_fp_enroll_capture(slot_id, cap);
         if (err == ESP_OK) {
-            msg_user("[ENROLL] Step %d/3 OK\n", step);
+            msg_user("[ENROLL] Scan %d/%d OK", cap + 1, APP_FP_ENROLL_CAPTURES);
+            if (cap + 1 < APP_FP_ENROLL_CAPTURES) {
+                msg_user(" — place same finger for next scan\n");
+            } else {
+                msg_user("\n");
+            }
             app_buzzer_beep_ok();
         } else {
-            msg_enroll_err(step, err);
+            msg_enroll_err(cap + 1, err);
             app_buzzer_beep_deny();
             break;
         }
@@ -229,19 +223,12 @@ static bool run_enroll(uint16_t slot_id)
         } else {
             msg_user("\n");
         }
+        (void)app_fp_clear_slot(slot_id);
         app_oled_show_lines("ENROLL", "Failed", "", "");
         return false;
     }
 
-    if (!app_fp_slot_occupied(slot_id)) {
-        msg_user("\n*** ENROLL FAILED (slot %u) ***\n", (unsigned)slot_id);
-        msg_user("  Module did not store the template — try again with firmer finger contact\n\n");
-        (void)app_fp_clear_slot(slot_id);
-        app_oled_show_lines("ENROLL", "Not stored", "", "");
-        app_buzzer_beep_deny();
-        return false;
-    }
-
+    /* 0788220 treated all captures OK as success — IDENTIFY often stays NOUSER on this module. */
     (void)app_fp_mark_slot_enrolled(slot_id);
     sync_template_count();
     uint8_t stored = 0;
@@ -426,16 +413,19 @@ static void run_pending_cloud_command(void)
     const char *mode = s_pending_cmd.desired_mode;
 
     if (strcmp(mode, "add") == 0) {
-        uint16_t slot = resolve_cloud_slot(s_pending_cmd.desired_fp_slot);
         const char *who = s_pending_cmd.person_display_name[0]
                               ? s_pending_cmd.person_display_name
                               : s_pending_cmd.desired_person_id;
-        msg_user("[CLOUD] Remote enroll slot %u — %s\n", (unsigned)slot, who);
-        if (app_fp_slot_is_marked(slot)) {
-            msg_user("[CLOUD] Slot %u marked — clearing for new enroll\n", (unsigned)slot);
-            (void)app_fp_clear_slot(slot);
-            vTaskDelay(pdMS_TO_TICKS(100));
+        uint16_t slot = 0;
+        if (app_fp_alloc_enroll_slot(&slot) != ESP_OK) {
+            msg_user("[CLOUD] Enroll failed — module full (no free slots)\n");
+            app_buzzer_beep_deny();
+            return;
         }
+        msg_user("[CLOUD] Enroll %s → module slot %u (auto)\n", who, (unsigned)slot);
+        /* Clear partial/failed enroll so ENROLL2 does not stay stuck. */
+        (void)app_fp_clear_slot(slot);
+        vTaskDelay(pdMS_TO_TICKS(150));
         if (run_enroll(slot)) {
             if (s_pending_cmd.desired_person_id[0] != '\0') {
                 app_cloud_report_enroll_done(slot, s_pending_cmd.desired_person_id);
@@ -646,6 +636,23 @@ static void on_go_button(void *ctx)
     post_action(ACT_RUN_PENDING);
 }
 
+static void on_bare_enroll_button(void *ctx)
+{
+    (void)ctx;
+    if (!s_fp_ok) {
+        msg_user("[BTN] Fingerprint module not ready\n");
+        app_buzzer_beep_error();
+        return;
+    }
+    if (s_busy) {
+        ESP_LOGW(TAG, "busy — ignore ENROLL");
+        app_buzzer_beep_busy();
+        return;
+    }
+    app_buzzer_beep_go();
+    post_action(ACT_BARE_ENROLL);
+}
+
 static void ui_worker_task(void *arg)
 {
     (void)arg;
@@ -660,6 +667,8 @@ static void ui_worker_task(void *arg)
         app_cloud_set_busy(true);
         if (act == ACT_RUN_PENDING) {
             run_pending_cloud_command();
+        } else if (act == ACT_BARE_ENROLL) {
+            app_fp_bare_enroll(APP_FP_BARE_SLOT);
         }
         s_busy = false;
         app_cloud_set_busy(false);
@@ -698,6 +707,8 @@ static void startup_task(void *arg)
 
     msg_user("\n[READY] Cloud-controlled scanner\n");
     msg_user("  GPIO0 = run pending command from dashboard\n");
+    msg_user("  GPIO1 = BARE enroll test (slot %u, 3 scans, no cloud)\n",
+             (unsigned)APP_FP_BARE_SLOT);
     msg_user("  Passive scan: enable in web dashboard\n");
     if (count > 0) {
         msg_user("  %u template(s) on device\n", (unsigned)count);
@@ -738,7 +749,8 @@ static void print_help(void)
     msg_user("  provision clear - remove NVS key (use menuconfig key)\n");
     msg_user("  deviceid UUID  - save device UUID for Realtime (from web dashboard)\n");
     msg_user("  cloudurl URL   - set Supabase base URL (NVS)\n");
-    msg_user("\nGPIO0 = GO (run pending cloud command from dashboard)\n\n");
+    msg_user("\nGPIO0 = GO (cloud command)   GPIO1 = bare enroll slot %u\n\n",
+             (unsigned)APP_FP_BARE_SLOT);
 }
 
 static void handle_serial_line(char *line)
@@ -977,7 +989,7 @@ void app_main(void)
         msg_user("[BOOT] Fingerprint module FAILED — check UART wiring\n");
     }
 
-    app_buttons_init(on_go_button, NULL);
+    app_buttons_init(on_go_button, on_bare_enroll_button, NULL);
 
     app_cloud_init();
     if (app_cloud_is_configured()) {
