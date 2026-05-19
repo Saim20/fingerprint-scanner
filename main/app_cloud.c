@@ -32,6 +32,8 @@ static app_cloud_command_cb_t s_cmd_cb;
 static void *s_cmd_ctx;
 static bool s_task_started;
 
+static const char *effective_url(void);
+
 static esp_err_t nvs_load(void)
 {
     nvs_handle_t h;
@@ -135,6 +137,7 @@ static esp_err_t http_post_json(const char *url, const char *body, char *resp, s
 
     esp_err_t err = esp_http_client_open(client, body ? (int)strlen(body) : 0);
     if (err != ESP_OK) {
+        ESP_LOGW(CLOUD_TAG, "HTTP open failed: %s (check TLS bundle / cloudurl)", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return err;
     }

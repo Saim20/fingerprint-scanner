@@ -109,3 +109,13 @@ a:hover {
   background: rgba(245, 158, 11, 0.2);
   color: var(--warn);
 }
+
+.btn-sm {
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+}
+
+.font-mono {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+}

@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import type { Person } from "@/lib/types";
-import Link from "next/link";
 import { revalidatePath } from "next/cache";
+import { PeopleList } from "./PeopleList";
 
 async function createPerson(formData: FormData) {
   "use server";
@@ -44,23 +44,7 @@ export default async function PeoplePage() {
         </button>
       </form>
 
-      <ul className="space-y-2">
-        {(people as Person[] | null)?.map((p) => (
-          <li key={p.id}>
-            <Link
-              href={`/dashboard/people/${p.id}`}
-              className="card block no-underline hover:border-[var(--accent)]"
-            >
-              <span className="font-medium text-[var(--text)]">{p.display_name}</span>
-              {p.external_id && (
-                <span className="text-sm text-[var(--muted)] ml-2">
-                  ({p.external_id})
-                </span>
-              )}
-            </Link>
-          </li>
-        ))}
-      </ul>
+      <PeopleList people={(people ?? []) as Person[]} />
     </div>
   );
 }

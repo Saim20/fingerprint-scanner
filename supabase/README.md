@@ -50,6 +50,10 @@ supabase functions deploy device-api
 
 Function URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/device-api`
 
+**ESP32 TLS:** `cloudurl` must be exactly `https://YOUR_REF.supabase.co` (no trailing slash).
+If you see `No matching trusted root certificate`, rebuild after updating `sdkconfig.defaults`
+(cross-signed cert support for Google Trust / Supabase).
+
 `verify_jwt` is disabled for this function; devices authenticate with `Authorization: Bearer <device_api_key>`.
 
 ## Local functions (optional)

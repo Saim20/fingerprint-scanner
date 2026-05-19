@@ -60,14 +60,56 @@ static void wifi_show_oled(const char *line2, const char *line3)
     }
 }
 
+static const char *wifi_reason_str(uint8_t reason)
+{
+    switch (reason) {
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "auth expired";
+    case WIFI_REASON_AUTH_LEAVE:
+        return "auth leave";
+    case WIFI_REASON_ASSOC_EXPIRE:
+        return "assoc expired";
+    case WIFI_REASON_ASSOC_TOOMANY:
+        return "AP full";
+    case WIFI_REASON_NOT_AUTHED:
+        return "not authenticated";
+    case WIFI_REASON_NOT_ASSOCED:
+        return "not associated";
+    case WIFI_REASON_ASSOC_LEAVE:
+        return "assoc leave";
+    case WIFI_REASON_ASSOC_NOT_AUTHED:
+        return "assoc not authed";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        return "4-way timeout (wrong password?)";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return "handshake timeout";
+    case WIFI_REASON_CONNECTION_FAIL:
+        return "connection fail";
+    case WIFI_REASON_AUTH_FAIL:
+        return "auth fail (wrong password or WPA mode?)";
+    case WIFI_REASON_NO_AP_FOUND:
+        return "SSID not found";
+    default:
+        return "see esp_wifi_types.h";
+    }
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
         s_connected = false;
         s_ip_addr = 0;
+        ESP_LOGW(WIFI_TAG, "disconnected: reason=%u (%s)", (unsigned)disc->reason,
+                 wifi_reason_str(disc->reason));
+        if (disc->reason == WIFI_REASON_AUTH_FAIL ||
+            disc->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+            disc->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
+            ESP_LOGW(WIFI_TAG, "check menuconfig SSID/password and set auth to WPA2/WPA3 if AP uses WPA3");
+        }
         if (s_retry_num < CONFIG_ESP_MAXIMUM_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
