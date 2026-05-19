@@ -1,3 +1,3 @@
-idf_component_register(SRCS "station_example_main.c"
-                    PRIV_REQUIRES esp_wifi nvs_flash
+idf_component_register(SRCS "app_buttons.c" "app_oled.c" "app_fingerprint.c" "app_buzzer.c" "station_example_main.c"
+                    PRIV_REQUIRES nvs_flash nixy4__u8g2 driver esp_driver_i2c esp_driver_uart esp_driver_ledc esp_driver_gpio
                     INCLUDE_DIRS ".")

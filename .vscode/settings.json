@@ -5,6 +5,7 @@
   ],
   "idf.port": "/dev/ttyACM0",
   "idf.currentSetup": "/home/saim/.espressif/v6.0.1/esp-idf",
+  "idf.buildPath": "${workspaceFolder}/build",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c3"
   },
@@ -12,7 +13,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/home/saim/Documents/Dev/esp/station/build"
+    "--compile-commands-dir=/home/saim/Documents/Dev/esp/fingerprint scanner/build"
   ],
-  "idf.flashType": "JTAG"
+  "idf.flashType": "UART"
 }
