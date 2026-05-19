@@ -20,14 +20,19 @@
 esp_err_t app_fp_init(void);
 bool app_fp_is_ready(void);
 
-/** Three-step enroll; place finger when OLED prompts. Returns ESP_OK on success. */
+#define APP_FP_ENROLL_MAX_TRIES 8
+
+/** Three-step enroll (ENROLL1 → ENROLL2 → ENROLL3). */
 esp_err_t app_fp_enroll(uint16_t slot_id);
 
-/** Single enroll step (1..3); use between UI updates. */
+/** Single step (1..3): ENROLL cmd blocks until finger captured (~20s). Steps 2–3 pause for lift. */
 esp_err_t app_fp_enroll_step(uint16_t slot_id, int step);
 
 /** 1:N search; sets *matched and *out_id on success. */
 esp_err_t app_fp_search(uint16_t *out_id, bool *matched);
+
+/** After app_fp_search with *matched false: true if a finger was read but not recognized. */
+bool app_fp_last_search_had_finger(void);
 
 /** 1:1 verify against one stored template (use right after enroll). */
 esp_err_t app_fp_identify(uint16_t slot_id);
@@ -52,3 +57,23 @@ esp_err_t app_fp_test_sensor(void);
 
 /** Last known template count (updated on enroll/delete/clear/count query). */
 uint8_t app_fp_stored_count(void);
+
+/** NVS-backed occupied slot list (fast; updated on enroll/delete/clear). */
+esp_err_t app_fp_slots_list(uint16_t *out_slots, size_t max_slots, size_t *out_count);
+
+/** FNV-1a hash of occupied slots (skip sync POST when unchanged). */
+uint32_t app_fp_slots_hash(void);
+
+bool app_fp_slot_is_marked(uint16_t slot_id);
+
+/** Probe module (ENROLL1 ack 0x06 = slot used); does not use NVS bitmap. */
+bool app_fp_slot_occupied(uint16_t slot_id);
+
+/** Delete template in slot if present; OK if slot was already empty. */
+esp_err_t app_fp_clear_slot(uint16_t slot_id);
+
+/** Mark slot occupied in NVS after module confirms template stored. */
+esp_err_t app_fp_mark_slot_enrolled(uint16_t slot_id);
+
+/** Probe module for occupied slots; updates NVS bitmap (slow; boot/manual only). */
+esp_err_t app_fp_slots_rebuild_registry(void);

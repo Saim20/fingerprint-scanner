@@ -35,7 +35,7 @@ export default async function PeoplePage() {
         </div>
         <div>
           <label className="label" htmlFor="external_id">
-            External ID (optional)
+            External ID (optional — use 1–150 to fix device slot)
           </label>
           <input id="external_id" name="external_id" className="input" />
         </div>

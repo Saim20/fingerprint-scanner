@@ -26,3 +26,6 @@ enable_signup = true
 
 [functions.device-api]
 verify_jwt = false
+
+[functions.device-token]
+verify_jwt = false

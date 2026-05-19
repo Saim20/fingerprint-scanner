@@ -65,6 +65,43 @@ export async function deletePerson(personId: string) {
   redirect("/dashboard/people");
 }
 
+export async function assignMapping(
+  deviceId: string,
+  fpSlot: number,
+  personId: string,
+) {
+  if (fpSlot < 1 || fpSlot > 150) {
+    return { error: "Slot must be 1–150" };
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase.rpc("assign_fp_mapping", {
+    p_device_id: deviceId,
+    p_fp_slot: fpSlot,
+    p_person_id: personId,
+  });
+
+  if (error) return { error: error.message };
+  revalidatePath(`/dashboard/devices/${deviceId}`);
+  revalidatePath("/dashboard/people");
+  return { ok: true };
+}
+
+export async function clearStaleMappings(deviceId: string, fpSlots: number[]) {
+  if (!fpSlots.length) return { ok: true };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("fp_mappings")
+    .delete()
+    .eq("device_id", deviceId)
+    .in("fp_slot", fpSlots);
+
+  if (error) return { error: error.message };
+  revalidatePath(`/dashboard/devices/${deviceId}`);
+  return { ok: true };
+}
+
 export async function deleteMapping(deviceId: string, fpSlot: number) {
   const supabase = await createClient();
   const { error } = await supabase
@@ -76,5 +113,18 @@ export async function deleteMapping(deviceId: string, fpSlot: number) {
   if (error) return { error: error.message };
   revalidatePath(`/dashboard/devices/${deviceId}`);
   revalidatePath("/dashboard/people");
+  return { ok: true };
+}
+
+export async function setDeviceBackgroundScan(deviceId: string, enabled: boolean) {
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("devices")
+    .update({ background_scan: enabled })
+    .eq("id", deviceId);
+
+  if (error) return { error: error.message };
+  revalidatePath(`/dashboard/devices/${deviceId}`);
+  revalidatePath("/dashboard");
   return { ok: true };
 }

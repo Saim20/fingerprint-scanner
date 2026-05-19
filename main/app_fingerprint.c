@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "nvs.h"
 
 #define FP_TAG "app_fp"
 
@@ -27,6 +28,15 @@
 #define FP_CMD_IDENTIFY    0x0B
 #define FP_CMD_SEARCH      0x0C
 #define FP_CMD_GET_IMAGE   0x23
+#define FP_CMD_SET_TIMEOUT 0x2E
+
+/*
+ * Capture-timeout reg (CMD 0x2E). Module multiplies by T0 (~0.2-0.3 s) to get
+ * per-capture wait window. Earlier firmware revisions wrote 0 here, which the
+ * clone latched into NVS as "don't wait" → instant ACK_FAIL on every ENROLL2.
+ * 25 = ~5-7 s per capture, matches the docs default and works for human reaction.
+ */
+#define FP_DEFAULT_CAPTURE_TOUT 25
 
 #define FP_ACK_SUCCESS     0x00
 #define FP_ACK_FAIL        0x01
@@ -41,14 +51,26 @@
 #define FP_RX_BUF_SIZE     192
 #define FP_SEARCH_TIMEOUT_MS 12000
 
+#define FP_REG_NVS_NS   "fp_reg"
+#define FP_REG_NVS_KEY  "slots"
+#define FP_REG_BYTES      19   /* 150 bits */
+
 static SemaphoreHandle_t s_lock;
+static uint8_t s_slot_bitmap[FP_REG_BYTES];
+static bool s_slot_bitmap_loaded;
 static bool s_ready;
+static bool s_last_search_had_finger;
 static int s_uart_baud;
 static uint16_t s_last_user_id;
 static uint8_t s_stored_count;
 static uint8_t s_last_ack;
 static uint8_t s_rx_buf[FP_RX_BUF_SIZE];
 static uint8_t s_tx_buf[FP_FRAME_LEN];
+
+static esp_err_t fp_run_cmd_timeout(uint8_t cmd, uint16_t arg, uint8_t arg_byte3, int timeout_ms,
+                                    bool flush_rx);
+static esp_err_t fp_run_cmd(uint8_t cmd, uint16_t arg, uint8_t arg_byte3);
+static void fp_slot_set_locked_save(uint16_t slot_id, bool occupied);
 
 static uint8_t fp_xor_checksum(uint8_t len, const uint8_t *data)
 {
@@ -130,6 +152,7 @@ static uint8_t fp_check_package(uint8_t cmd)
     case FP_CMD_GET_IMAGE:
     case FP_CMD_DELETE:
     case FP_CMD_CLEAR:
+    case FP_CMD_SET_TIMEOUT:
         if (s_rx_buf[4] == FP_ACK_SUCCESS) {
             return FP_ACK_SUCCESS;
         }
@@ -263,11 +286,84 @@ static esp_err_t fp_run_cmd(uint8_t cmd, uint16_t arg, uint8_t arg_byte3)
     int timeout_ms = 3000;
     if (cmd == FP_CMD_SEARCH) {
         timeout_ms = FP_SEARCH_TIMEOUT_MS;
+    } else if (cmd == FP_CMD_DELETE || cmd == FP_CMD_CLEAR) {
+        timeout_ms = 8000;
     } else if (cmd == FP_CMD_ENROLL1 || cmd == FP_CMD_ENROLL2 || cmd == FP_CMD_ENROLL3 ||
                cmd == FP_CMD_GET_IMAGE || cmd == FP_CMD_IDENTIFY || cmd == FP_CMD_SEARCH) {
         timeout_ms = 20000;
     }
     return fp_run_cmd_timeout(cmd, arg, arg_byte3, timeout_ms, true);
+}
+
+static uint32_t fp_slots_hash_locked(void)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < FP_REG_BYTES; i++) {
+        h ^= s_slot_bitmap[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void fp_reg_load(void)
+{
+    if (s_slot_bitmap_loaded) {
+        return;
+    }
+    memset(s_slot_bitmap, 0, sizeof(s_slot_bitmap));
+    nvs_handle_t h;
+    if (nvs_open(FP_REG_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(s_slot_bitmap);
+        if (nvs_get_blob(h, FP_REG_NVS_KEY, s_slot_bitmap, &len) != ESP_OK || len != sizeof(s_slot_bitmap)) {
+            memset(s_slot_bitmap, 0, sizeof(s_slot_bitmap));
+        }
+        nvs_close(h);
+    }
+    s_slot_bitmap_loaded = true;
+}
+
+static esp_err_t fp_reg_save(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(FP_REG_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_blob(h, FP_REG_NVS_KEY, s_slot_bitmap, sizeof(s_slot_bitmap));
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+static void fp_slot_set_locked(uint16_t slot_id, bool occupied)
+{
+    if (slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
+        return;
+    }
+    fp_reg_load();
+    uint16_t bit = (uint16_t)(slot_id - APP_FP_MIN_USER_ID);
+    uint8_t *b = &s_slot_bitmap[bit / 8];
+    uint8_t mask = (uint8_t)(1u << (bit % 8));
+    if (occupied) {
+        *b |= mask;
+    } else {
+        *b &= (uint8_t)~mask;
+    }
+}
+
+static void fp_slot_set_locked_save(uint16_t slot_id, bool occupied)
+{
+    fp_slot_set_locked(slot_id, occupied);
+    (void)fp_reg_save();
+}
+
+/** True when a stored template exists in this slot (1:1 verify). Never use ENROLL1 here. */
+static bool fp_slot_occupied_probe_locked(uint16_t slot_id)
+{
+    esp_err_t err = fp_run_cmd_timeout(FP_CMD_IDENTIFY, slot_id, 0, 3000, true);
+    return err == ESP_OK;
 }
 
 /** Caller must hold s_lock. */
@@ -464,6 +560,12 @@ esp_err_t app_fp_enroll_step(uint16_t slot_id, int step)
         return ESP_ERR_TIMEOUT;
     }
 
+    /*
+     * Original working logic (commit 0788220 "FP works with buttons for control").
+     * No probing, no per-attempt prompts — let the module's own wait-for-finger
+     * timeout cycle handle lift/re-press timing. 25 tries × ~1 s delay gives the
+     * user ~30 s to get each step right.
+     */
     esp_err_t err = ESP_ERR_TIMEOUT;
     const int max_tries = 25;
 
@@ -483,6 +585,7 @@ esp_err_t app_fp_enroll_step(uint16_t slot_id, int step)
     }
 
     if (err == ESP_OK && step == 3) {
+        fp_slot_set_locked_save(slot_id, true);
         fp_refresh_count_locked();
     }
     xSemaphoreGive(s_lock);
@@ -490,6 +593,20 @@ esp_err_t app_fp_enroll_step(uint16_t slot_id, int step)
         vTaskDelay(pdMS_TO_TICKS(300));
     }
     return err;
+}
+
+esp_err_t app_fp_mark_slot_enrolled(uint16_t slot_id)
+{
+    if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    fp_slot_set_locked_save(slot_id, true);
+    fp_refresh_count_locked();
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
 }
 
 esp_err_t app_fp_enroll(uint16_t slot_id)
@@ -516,12 +633,18 @@ esp_err_t app_fp_identify(uint16_t slot_id)
     return err;
 }
 
+bool app_fp_last_search_had_finger(void)
+{
+    return s_last_search_had_finger;
+}
+
 esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
 {
     if (!s_ready || out_id == NULL || matched == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     *matched = false;
+    s_last_search_had_finger = false;
 
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(90000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
@@ -531,9 +654,11 @@ esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
     vTaskDelay(pdMS_TO_TICKS(1200));
 
     esp_err_t err = ESP_FAIL;
+    esp_err_t last_err = ESP_FAIL;
     for (int try_n = 1; try_n <= 12; try_n++) {
         /* Only flush UART before the first attempt — retries may have a late reply. */
         err = fp_run_cmd_timeout(FP_CMD_SEARCH, 0, 0, 20000, try_n == 1);
+        last_err = err;
         if (err == ESP_OK) {
             *out_id = s_last_user_id;
             *matched = true;
@@ -546,9 +671,10 @@ esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_TIMEOUT) {
+    if (last_err == ESP_ERR_NOT_FOUND || last_err == ESP_ERR_TIMEOUT) {
         fp_log_last_frame("SEARCH final");
         *matched = false;
+        s_last_search_had_finger = (last_err == ESP_ERR_NOT_FOUND);
         xSemaphoreGive(s_lock);
         return ESP_OK;
     }
@@ -562,14 +688,32 @@ esp_err_t app_fp_delete(uint16_t slot_id)
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(15000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t err = fp_run_cmd(FP_CMD_DELETE, slot_id, 0);
     if (err == ESP_OK) {
+        fp_slot_set_locked_save(slot_id, false);
         fp_refresh_count_locked();
+    } else if (s_last_ack == FP_ACK_NOUSER) {
+        fp_slot_set_locked_save(slot_id, false);
+        err = ESP_OK;
     }
     xSemaphoreGive(s_lock);
+    return err;
+}
+
+/** Caller must hold s_lock. Delete one slot; OK if already empty. */
+static esp_err_t fp_delete_locked(uint16_t slot_id)
+{
+    esp_err_t err = fp_run_cmd(FP_CMD_DELETE, slot_id, 0);
+    if (err == ESP_OK) {
+        fp_slot_set_locked_save(slot_id, false);
+        fp_refresh_count_locked();
+    } else if (s_last_ack == FP_ACK_NOUSER) {
+        fp_slot_set_locked_save(slot_id, false);
+        err = ESP_OK;
+    }
     return err;
 }
 
@@ -578,20 +722,68 @@ esp_err_t app_fp_clear_all(void)
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(60000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    esp_err_t err = fp_run_cmd_timeout(FP_CMD_CLEAR, 0, 0, 15000, true);
+
+    esp_err_t err = fp_run_cmd_timeout(FP_CMD_CLEAR, 0, 0, 4000, true);
     if (err == ESP_OK || s_last_ack == FP_ACK_NOUSER) {
-        /* Module returns NOUSER when the store is already empty. */
         s_stored_count = 0;
         s_last_ack = 0;
-        err = ESP_OK;
-    } else {
-        ESP_LOGW(FP_TAG, "clear failed ack=0x%02x", s_last_ack);
+        fp_reg_load();
+        memset(s_slot_bitmap, 0, sizeof(s_slot_bitmap));
+        (void)fp_reg_save();
+        xSemaphoreGive(s_lock);
+        return ESP_OK;
     }
+
+    ESP_LOGW(FP_TAG, "CLEAR cmd failed (ack=0x%02x) — deleting slots individually", s_last_ack);
+
+    uint16_t slots[APP_FP_MAX_SLOTS];
+    size_t n = 0;
+    fp_reg_load();
+    for (uint16_t slot = APP_FP_MIN_USER_ID; slot <= APP_FP_MAX_USER_ID; slot++) {
+        uint16_t bit = (uint16_t)(slot - APP_FP_MIN_USER_ID);
+        if ((s_slot_bitmap[bit / 8] & (uint8_t)(1u << (bit % 8))) != 0) {
+            if (n < APP_FP_MAX_SLOTS) {
+                slots[n++] = slot;
+            }
+        }
+    }
+
+    if (n == 0) {
+        fp_refresh_count_locked();
+        uint16_t max_slot = APP_FP_MAX_USER_ID;
+        if (s_stored_count > 0 && s_stored_count < APP_FP_MAX_SLOTS) {
+            max_slot = (uint16_t)(APP_FP_MIN_USER_ID + s_stored_count * 2u);
+            if (max_slot > APP_FP_MAX_USER_ID) {
+                max_slot = APP_FP_MAX_USER_ID;
+            }
+        }
+        for (uint16_t slot = APP_FP_MIN_USER_ID; slot <= max_slot && s_stored_count > 0; slot++) {
+            if (fp_slot_occupied_probe_locked(slot)) {
+                (void)fp_delete_locked(slot);
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            (void)fp_delete_locked(slots[i]);
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+
+    fp_refresh_count_locked();
+    if (s_stored_count == 0) {
+        memset(s_slot_bitmap, 0, sizeof(s_slot_bitmap));
+        (void)fp_reg_save();
+        xSemaphoreGive(s_lock);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(FP_TAG, "clear incomplete — %u template(s) remain", (unsigned)s_stored_count);
     xSemaphoreGive(s_lock);
-    return err;
+    return ESP_FAIL;
 }
 
 uint8_t app_fp_stored_count(void)
@@ -610,6 +802,123 @@ esp_err_t app_fp_get_user_count(uint8_t *count)
     esp_err_t err = fp_run_cmd(FP_CMD_USERNUMB, 0, 0);
     if (err == ESP_OK) {
         *count = s_stored_count;
+    }
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
+bool app_fp_slot_is_marked(uint16_t slot_id)
+{
+    if (slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
+        return false;
+    }
+    fp_reg_load();
+    uint16_t bit = (uint16_t)(slot_id - APP_FP_MIN_USER_ID);
+    return (s_slot_bitmap[bit / 8] & (uint8_t)(1u << (bit % 8))) != 0;
+}
+
+esp_err_t app_fp_slots_list(uint16_t *out_slots, size_t max_slots, size_t *out_count)
+{
+    if (out_count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    fp_reg_load();
+    size_t n = 0;
+    for (uint16_t slot = APP_FP_MIN_USER_ID; slot <= APP_FP_MAX_USER_ID; slot++) {
+        if (!app_fp_slot_is_marked(slot)) {
+            continue;
+        }
+        if (out_slots != NULL && n < max_slots) {
+            out_slots[n] = slot;
+        }
+        n++;
+    }
+    *out_count = n;
+    return ESP_OK;
+}
+
+uint32_t app_fp_slots_hash(void)
+{
+    fp_reg_load();
+    return fp_slots_hash_locked();
+}
+
+esp_err_t app_fp_slots_rebuild_registry(void)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(120000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    fp_refresh_count_locked();
+    uint8_t target = s_stored_count;
+
+    memset(s_slot_bitmap, 0, sizeof(s_slot_bitmap));
+    s_slot_bitmap_loaded = true;
+
+    uint8_t marked = 0;
+    /* Cap scan window — probing all 150 slots can block for minutes on empty modules. */
+    uint16_t max_slot = APP_FP_MAX_USER_ID;
+    if (target > 0) {
+        uint32_t window = (uint32_t)target * 15u + 10u;
+        if (window > APP_FP_MAX_SLOTS) {
+            window = APP_FP_MAX_SLOTS;
+        }
+        max_slot = (uint16_t)(APP_FP_MIN_USER_ID + window - 1u);
+        if (max_slot > APP_FP_MAX_USER_ID) {
+            max_slot = APP_FP_MAX_USER_ID;
+        }
+    }
+
+    for (uint16_t slot = APP_FP_MIN_USER_ID; slot <= max_slot; slot++) {
+        if (target > 0 && marked >= target) {
+            break;
+        }
+        if (fp_slot_occupied_probe_locked(slot)) {
+            fp_slot_set_locked(slot, true);
+            marked++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+
+    (void)fp_reg_save();
+    fp_refresh_count_locked();
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(FP_TAG, "slot registry rebuilt: marked=%u module=%u", (unsigned)marked,
+             (unsigned)s_stored_count);
+    return ESP_OK;
+}
+
+bool app_fp_slot_occupied(uint16_t slot_id)
+{
+    if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
+        return false;
+    }
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        return false;
+    }
+    bool occupied = fp_slot_occupied_probe_locked(slot_id);
+    xSemaphoreGive(s_lock);
+    return occupied;
+}
+
+esp_err_t app_fp_clear_slot(uint16_t slot_id)
+{
+    if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err = fp_run_cmd(FP_CMD_DELETE, slot_id, 0);
+    if (err == ESP_OK) {
+        fp_slot_set_locked_save(slot_id, false);
+        fp_refresh_count_locked();
+    } else if (s_last_ack == FP_ACK_NOUSER) {
+        fp_slot_set_locked_save(slot_id, false);
+        err = ESP_OK;
     }
     xSemaphoreGive(s_lock);
     return err;

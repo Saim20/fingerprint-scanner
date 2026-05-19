@@ -1,4 +1,4 @@
-export type DeviceMode = "idle" | "add" | "scan" | "delete";
+export type DeviceMode = "idle" | "add" | "scan" | "delete" | "clear";
 
 export type Person = {
   id: string;
@@ -15,7 +15,12 @@ export type Device = {
   desired_fp_slot: number;
   command_seq: number;
   ack_seq: number;
+  background_scan: boolean;
   last_seen_at: string | null;
+  reported_fp_count?: number | null;
+  reported_fp_slots?: number[] | null;
+  reported_slots_hash?: string | null;
+  last_template_sync_at?: string | null;
   created_at: string;
 };
 

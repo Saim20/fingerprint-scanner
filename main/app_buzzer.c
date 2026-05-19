@@ -15,10 +15,13 @@
 
 static bool s_ready;
 
-static esp_err_t buzzer_tone_ms(uint32_t ms)
+static esp_err_t buzzer_tone_ms(uint32_t freq_hz, uint32_t ms)
 {
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (freq_hz > 0) {
+        ledc_set_freq(LEDC_LOW_SPEED_MODE, BUZZ_LEDC_TIMER, freq_hz);
     }
     ledc_set_duty(LEDC_LOW_SPEED_MODE, BUZZ_LEDC_CHANNEL, BUZZ_DUTY_ON);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, BUZZ_LEDC_CHANNEL);
@@ -26,6 +29,11 @@ static esp_err_t buzzer_tone_ms(uint32_t ms)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, BUZZ_LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, BUZZ_LEDC_CHANNEL);
     return ESP_OK;
+}
+
+static void buzzer_gap_ms(uint32_t ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
 esp_err_t app_buzzer_init(void)
@@ -67,12 +75,116 @@ esp_err_t app_buzzer_init(void)
 
 void app_buzzer_beep_ok(void)
 {
-    buzzer_tone_ms(120);
+    buzzer_tone_ms(BUZZ_FREQ_HZ, 120);
 }
 
 void app_buzzer_beep_deny(void)
 {
-    buzzer_tone_ms(80);
-    vTaskDelay(pdMS_TO_TICKS(60));
-    buzzer_tone_ms(80);
+    buzzer_tone_ms(2200, 80);
+    buzzer_gap_ms(60);
+    buzzer_tone_ms(2200, 80);
+}
+
+void app_buzzer_beep_notify(void)
+{
+    buzzer_tone_ms(3200, 70);
+}
+
+void app_buzzer_beep_cancel(void)
+{
+    buzzer_tone_ms(1800, 60);
+}
+
+void app_buzzer_beep_mode(bool passive_scan)
+{
+    if (passive_scan) {
+        buzzer_tone_ms(2200, 55);
+        buzzer_gap_ms(45);
+        buzzer_tone_ms(3000, 75);
+    } else {
+        buzzer_tone_ms(3000, 55);
+        buzzer_gap_ms(45);
+        buzzer_tone_ms(2200, 75);
+    }
+}
+
+void app_buzzer_beep_ready(void)
+{
+    buzzer_tone_ms(2000, 45);
+    buzzer_gap_ms(35);
+    buzzer_tone_ms(2600, 45);
+    buzzer_gap_ms(35);
+    buzzer_tone_ms(3200, 70);
+}
+
+void app_buzzer_beep_prompt(void)
+{
+    buzzer_tone_ms(2400, 45);
+    buzzer_gap_ms(30);
+    buzzer_tone_ms(3000, 55);
+}
+
+void app_buzzer_beep_lift(void)
+{
+    buzzer_tone_ms(3000, 40);
+    buzzer_gap_ms(30);
+    buzzer_tone_ms(2400, 50);
+}
+
+void app_buzzer_beep_no_match(void)
+{
+    buzzer_tone_ms(1500, 100);
+}
+
+void app_buzzer_beep_go(void)
+{
+    buzzer_tone_ms(3200, 40);
+    buzzer_gap_ms(35);
+    buzzer_tone_ms(3200, 40);
+}
+
+void app_buzzer_beep_busy(void)
+{
+    buzzer_tone_ms(2500, 35);
+}
+
+void app_buzzer_beep_start(void)
+{
+    buzzer_tone_ms(2600, 90);
+}
+
+void app_buzzer_beep_done(void)
+{
+    buzzer_tone_ms(2400, 55);
+    buzzer_gap_ms(40);
+    buzzer_tone_ms(2800, 55);
+    buzzer_gap_ms(40);
+    buzzer_tone_ms(3200, 80);
+}
+
+void app_buzzer_beep_warn(void)
+{
+    buzzer_tone_ms(2000, 55);
+    buzzer_gap_ms(50);
+    buzzer_tone_ms(2000, 55);
+}
+
+void app_buzzer_beep_error(void)
+{
+    buzzer_tone_ms(1600, 180);
+    buzzer_gap_ms(70);
+    buzzer_tone_ms(1600, 180);
+    buzzer_gap_ms(70);
+    buzzer_tone_ms(1600, 260);
+}
+
+void app_buzzer_beep_wifi(bool connected)
+{
+    if (connected) {
+        buzzer_tone_ms(2800, 50);
+        buzzer_gap_ms(40);
+        buzzer_tone_ms(3400, 60);
+    } else {
+        buzzer_tone_ms(1800, 130);
+    }
 }

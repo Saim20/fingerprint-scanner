@@ -13,8 +13,8 @@ menu "Example Configuration"
             WiFi password (WPA or WPA2) for the example to use.
 
     choice ESP_WIFI_SAE_MODE
-        prompt "WPA3 SAE mode selection"
-        default ESP_STATION_EXAMPLE_WPA3_SAE_PWE_BOTH
+        prompt "WPA3 SAE mode selection (only if using WPA3 auth threshold)"
+        default ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HUNT_AND_PECK
         help
             Select mode for SAE as Hunt and Peck, H2E or both.
         config ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HUNT_AND_PECK
@@ -42,11 +42,9 @@ menu "Example Configuration"
 
     choice ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD
         prompt "WiFi Scan auth mode threshold"
-        default ESP_WIFI_AUTH_WPA2_WPA3_PSK
+        default ESP_WIFI_AUTH_WPA2_PSK
         help
-            The weakest authmode to accept in the scan mode.
-            This value defaults to ESP_WIFI_AUTH_WPA2_PSK in case password is present and ESP_WIFI_AUTH_OPEN is used.
-            Please select ESP_WIFI_AUTH_WEP/ESP_WIFI_AUTH_WPA_PSK in case AP is operating in WEP/WPA mode.
+            Minimum Wi-Fi security the ESP will accept. Use WPA2 PSK for typical home routers.
 
         config ESP_WIFI_AUTH_OPEN
             bool "OPEN"
@@ -71,6 +69,13 @@ menu "Example Configuration"
         default ""
         help
             Base URL for Edge Functions. Can override via NVS (cloudurl command).
+
+    config CLOUD_SUPABASE_PUBLISHABLE_KEY
+        string "Supabase publishable key (sb_publishable_...)"
+        default ""
+        help
+            Project publishable key — required apikey header for Edge Functions.
+            Same as NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY in web/.env.local.
 
     config CLOUD_DEVICE_API_KEY
         string "Device API key (optional; prefer NVS provision)"

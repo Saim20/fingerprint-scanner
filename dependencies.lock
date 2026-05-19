@@ -9,12 +9,8 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.7.19~2
-  idf:
-    source:
-      type: idf
-    version: 6.0.1
-  nixy4/u8g2:
-    component_hash: d23326bf33da6b0a41ef16caa527689d770bcb7c469d8d57ca18a42f4cfed81b
+  espressif/esp_websocket_client:
+    component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
     dependencies:
     - name: idf
       require: private
@@ -22,10 +18,22 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 0.1.4
+    version: 1.7.0
+  idf:
+    source:
+      type: idf
+    version: 6.0.1
+  tny-robotics/sh1106-esp-idf:
+    component_hash: b7a0cd10a16a249142b400014ad41716fb5420b4b55e08b9693e5911d9949a49
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.1
 direct_dependencies:
 - espressif/cjson
-- nixy4/u8g2
-manifest_hash: b82a7c49efd8c4ef3d178760e48703b5013482a257de41ea6fefd98031d45f32
+- espressif/esp_websocket_client
+- tny-robotics/sh1106-esp-idf
+manifest_hash: cd22ce966a6d0055cd9909451bbee34d4a209d338469bc6ea8d5e60806174886
 target: esp32c3
 version: 3.0.0

@@ -42,24 +42,31 @@ export SUPABASE_DB_PASSWORD='your-database-password'   # if not using supabase/.
 supabase db push
 ```
 
-## Deploy device API (ESP32)
+After the initial schema, apply template-sync migration (`20250519100000_template_sync.sql`) with the same `supabase db push` command.
+
+## Deploy edge functions (ESP32)
 
 ```bash
 supabase functions deploy device-api
+supabase functions deploy device-token
 ```
 
-Function URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/device-api`
+- **device-api** — HTTP sync + events (`?action=sync|event`)
+- **device-token** — mints short-lived JWT for Supabase Realtime WebSocket on the device
+
+Function URLs: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/device-api` and `.../device-token`
 
 **ESP32 TLS:** `cloudurl` must be exactly `https://YOUR_REF.supabase.co` (no trailing slash).
 If you see `No matching trusted root certificate`, rebuild after updating `sdkconfig.defaults`
 (cross-signed cert support for Google Trust / Supabase).
 
-`verify_jwt` is disabled for this function; devices authenticate with `Authorization: Bearer <device_api_key>`.
+`verify_jwt` is disabled for these functions; devices authenticate with `Authorization: Bearer <device_api_key>`.
 
 ## Local functions (optional)
 
 ```bash
 supabase functions serve device-api --env-file supabase/.env.local
+supabase functions serve device-token --env-file supabase/.env.local
 ```
 
 ## Rotate a device key

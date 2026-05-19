@@ -1,18 +1,22 @@
 import { createClient } from "@/lib/supabase/server";
-import { hasPendingCommand, isDeviceOnline } from "@/lib/device-status";
 import type { Device, Person } from "@/lib/types";
 import Link from "next/link";
 import { DeviceCommands } from "./DeviceCommands";
 import { ApiKeyBanner } from "./ApiKeyBanner";
+import { DeviceLiveStatus } from "./DeviceLiveStatus";
 import { DeviceManagePanel } from "./DeviceManagePanel";
 import { MappingTable } from "./MappingTable";
+import { TemplateSyncPanel } from "./TemplateSyncPanel";
 
-function personName(
-  people: { display_name: string } | { display_name: string }[] | null,
-): string | null {
+function personFields(
+  people:
+    | { display_name: string; external_id: string | null }
+    | { display_name: string; external_id: string | null }[]
+    | null,
+): { display_name: string; external_id: string | null } | null {
   if (!people) return null;
-  if (Array.isArray(people)) return people[0]?.display_name ?? null;
-  return people.display_name;
+  if (Array.isArray(people)) return people[0] ?? null;
+  return people;
 }
 
 export default async function DeviceDetailPage({
@@ -39,7 +43,7 @@ export default async function DeviceDetailPage({
 
   const { data: mappings } = await supabase
     .from("fp_mappings")
-    .select("fp_slot, person_id, enrolled_at, people(display_name)")
+    .select("fp_slot, person_id, enrolled_at, people(display_name, external_id)")
     .eq("device_id", id)
     .order("fp_slot");
 
@@ -49,12 +53,18 @@ export default async function DeviceDetailPage({
 
   const d = device as Device;
   const mappingRows =
-    mappings?.map((m) => ({
-      fp_slot: m.fp_slot,
-      person_id: m.person_id,
-      enrolled_at: m.enrolled_at,
-      personLabel: personName(m.people) ?? m.person_id,
-    })) ?? [];
+    mappings?.map((m) => {
+      const p = personFields(m.people);
+      return {
+        fp_slot: m.fp_slot,
+        person_id: m.person_id,
+        enrolled_at: m.enrolled_at,
+        personLabel: p?.display_name ?? m.person_id,
+        externalId: p?.external_id ?? null,
+      };
+    }) ?? [];
+
+  const reportedSlots = (d.reported_fp_slots ?? []).map(Number).sort((a, b) => a - b);
 
   return (
     <div>
@@ -63,23 +73,26 @@ export default async function DeviceDetailPage({
       </Link>
       <h1 className="text-2xl font-semibold mt-2 mb-1">{d.name}</h1>
       <p className="text-sm text-[var(--muted)] mb-2 font-mono">{d.id}</p>
-      <p className="text-sm text-[var(--muted)] mb-6">
-        <span className={`badge ${isDeviceOnline(d) ? "badge-online" : "badge-offline"}`}>
-          {isDeviceOnline(d) ? "Online" : "Offline"}
-        </span>
-        {hasPendingCommand(d) && (
-          <span className="badge badge-pending ml-2">Command pending</span>
-        )}
-        {" · "}
-        Mode: {d.desired_mode} · cmd {d.command_seq} / ack {d.ack_seq}
-        {d.last_seen_at && (
-          <> · Last seen {new Date(d.last_seen_at).toLocaleString()}</>
-        )}
-      </p>
 
-      {apiKey && <ApiKeyBanner apiKey={apiKey} />}
+      <DeviceLiveStatus initialDevice={d} people={(people ?? []) as Person[]} />
 
-      <DeviceCommands deviceId={d.id} people={(people ?? []) as Person[]} />
+      {apiKey && <ApiKeyBanner apiKey={apiKey} deviceId={d.id} />}
+
+      <DeviceCommands
+        deviceId={d.id}
+        people={(people ?? []) as Person[]}
+        reportedSlots={reportedSlots}
+        backgroundScan={d.background_scan ?? false}
+      />
+
+      <TemplateSyncPanel
+        deviceId={d.id}
+        reportedSlots={reportedSlots}
+        reportedCount={d.reported_fp_count ?? null}
+        lastSyncAt={d.last_template_sync_at ?? null}
+        mappings={mappingRows}
+        people={(people ?? []) as Person[]}
+      />
 
       <section className="mt-8">
         <h2 className="text-lg font-medium mb-3">Fingerprint mappings</h2>

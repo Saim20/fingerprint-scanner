@@ -2,7 +2,13 @@
 
 import { useState } from "react";
 
-export function ApiKeyBanner({ apiKey }: { apiKey: string }) {
+export function ApiKeyBanner({
+  apiKey,
+  deviceId,
+}: {
+  apiKey: string;
+  deviceId: string;
+}) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -20,7 +26,13 @@ export function ApiKeyBanner({ apiKey }: { apiKey: string }) {
         {apiKey}
       </code>
       <p className="text-sm text-[var(--muted)] mb-3">
-        On the ESP32 serial monitor: <code>provision {apiKey}</code> then reboot.
+        On the ESP32 serial monitor:
+        <br />
+        <code>provision {apiKey}</code>
+        <br />
+        <code>deviceid {deviceId}</code>
+        <br />
+        then reboot (or wait for Realtime reconnect).
       </p>
       <button type="button" onClick={copy} className="btn btn-primary">
         {copied ? "Copied" : "Copy key"}

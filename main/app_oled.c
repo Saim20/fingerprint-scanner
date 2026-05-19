@@ -1,17 +1,18 @@
 #include "app_oled.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "app_oled_font.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_ssd1306.h"
+#include "esp_lcd_panel_sh1106.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "u8g2.h"
 
 #define OLED_TAG "app_oled"
 
@@ -19,7 +20,8 @@
 #define OLED_H                  64
 #define OLED_I2C_PORT           0
 #define OLED_I2C_HZ             100000
-#define OLED_PROBE_MS           50
+#define OLED_PROBE_MS           100
+#define OLED_LINE_H             8
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static int s_sda_pin = APP_OLED_PIN_SDA;
@@ -27,7 +29,6 @@ static int s_scl_pin = APP_OLED_PIN_SCL;
 static esp_lcd_panel_io_handle_t s_io;
 static esp_lcd_panel_handle_t s_panel;
 static uint8_t s_fb[OLED_W * OLED_H / 8];
-static u8g2_t s_u8g2;
 static SemaphoreHandle_t s_lock;
 static bool s_ready;
 
@@ -157,6 +158,8 @@ void app_oled_diag(void)
     if (!any) {
         printf("  No OLED on any tried pin pair.\n");
         printf("  Wiring: VCC=3V3 GND=GND SDA/SCL to module (try swap)\n");
+        printf("  1.3\" boards: jumper 0x78 on PCB = address 0x3C (OK)\n");
+        printf("  Header often: GND | VCC | SCL | SDA (verify order)\n");
         printf("  Target pins: SDA=GPIO%d SCL=GPIO%d\n", APP_OLED_PIN_SDA, APP_OLED_PIN_SCL);
         ESP_LOGW(OLED_TAG, "no device on any candidate pins");
     } else if (!s_ready) {
@@ -182,14 +185,14 @@ static esp_err_t oled_panel_init(uint8_t i2c_addr_7bit)
         return err;
     }
 
-    esp_lcd_panel_ssd1306_config_t ssd_cfg = {.height = OLED_H};
+    esp_lcd_panel_sh1106_config_t sh1106_cfg;
     esp_lcd_panel_dev_config_t panel_cfg = {
         .bits_per_pixel = 1,
         .reset_gpio_num = -1,
-        .vendor_config = &ssd_cfg,
+        .vendor_config = &sh1106_cfg,
     };
 
-    err = esp_lcd_new_panel_ssd1306(s_io, &panel_cfg, &s_panel);
+    err = esp_lcd_new_panel_sh1106(s_io, &panel_cfg, &s_panel);
     if (err != ESP_OK) {
         ESP_LOGE(OLED_TAG, "panel: %s", esp_err_to_name(err));
         return err;
@@ -197,20 +200,9 @@ static esp_err_t oled_panel_init(uint8_t i2c_addr_7bit)
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-
-#if APP_OLED_USE_SH1106
-    ESP_ERROR_CHECK(esp_lcd_panel_set_gap(s_panel, 2, 0));
-#endif
-
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, false));
     return ESP_OK;
-}
-
-static void oled_u8g2_bind_buffer(void)
-{
-    u8g2_SetupBuffer(&s_u8g2, s_fb, 8, u8g2_ll_hvline_vertical_top_lsb, U8G2_R0);
-    u8g2_SetFont(&s_u8g2, u8g2_font_6x10_tf);
 }
 
 static esp_err_t oled_flush_framebuffer(void)
@@ -229,11 +221,11 @@ esp_err_t app_oled_init(void)
     return ESP_ERR_NOT_FOUND;
 #endif
 
-    ESP_LOGI(OLED_TAG, "external OLED — expect SDA GPIO%d SCL GPIO%d", APP_OLED_PIN_SDA,
+    ESP_LOGI(OLED_TAG, "external SH1106 — expect SDA GPIO%d SCL GPIO%d", APP_OLED_PIN_SDA,
              APP_OLED_PIN_SCL);
     printf("\n[OLED] init (external) SDA=GPIO%d SCL=GPIO%d\n", APP_OLED_PIN_SDA, APP_OLED_PIN_SCL);
 
-    vTaskDelay(pdMS_TO_TICKS(250));
+    vTaskDelay(pdMS_TO_TICKS(400));
 
     oled_bus_match_t match = {0};
     if (!oled_find_bus(&match)) {
@@ -257,15 +249,13 @@ esp_err_t app_oled_init(void)
         return err;
     }
 
-    oled_u8g2_bind_buffer();
-    memset(s_fb, 0xff, sizeof(s_fb));
+    oled_font_clear(s_fb, OLED_W, OLED_H);
     err = oled_flush_framebuffer();
     if (err != ESP_OK) {
         ESP_LOGE(OLED_TAG, "draw failed: %s", esp_err_to_name(err));
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(100));
-    memset(s_fb, 0, sizeof(s_fb));
 
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) {
@@ -292,23 +282,22 @@ void app_oled_show_lines(const char *line1, const char *line2, const char *line3
         return;
     }
 
-    u8g2_ClearBuffer(&s_u8g2);
-    const int line_h = 12;
-    int y = 10;
+    oled_font_clear(s_fb, OLED_W, OLED_H);
+    int y = 7;
     if (line1) {
-        u8g2_DrawStr(&s_u8g2, 0, y, line1);
-        y += line_h;
+        oled_font_draw_str(s_fb, 0, y, OLED_W, OLED_H, line1);
+        y += OLED_LINE_H;
     }
     if (line2) {
-        u8g2_DrawStr(&s_u8g2, 0, y, line2);
-        y += line_h;
+        oled_font_draw_str(s_fb, 0, y, OLED_W, OLED_H, line2);
+        y += OLED_LINE_H;
     }
     if (line3) {
-        u8g2_DrawStr(&s_u8g2, 0, y, line3);
-        y += line_h;
+        oled_font_draw_str(s_fb, 0, y, OLED_W, OLED_H, line3);
+        y += OLED_LINE_H;
     }
     if (line4) {
-        u8g2_DrawStr(&s_u8g2, 0, y, line4);
+        oled_font_draw_str(s_fb, 0, y, OLED_W, OLED_H, line4);
     }
 
     esp_err_t err = oled_flush_framebuffer();

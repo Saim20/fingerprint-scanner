@@ -10,6 +10,7 @@ type MappingRow = {
   person_id: string;
   enrolled_at: string;
   personLabel: string;
+  externalId: string | null;
 };
 
 export function MappingTable({
@@ -38,7 +39,8 @@ export function MappingTable({
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-[var(--muted)] border-b border-[var(--border)]">
-            <th className="py-2">Slot</th>
+            <th className="py-2">Device slot</th>
+            <th className="py-2">External ID</th>
             <th className="py-2">Person</th>
             <th className="py-2">Enrolled</th>
             <th className="py-2 w-32"></th>
@@ -47,7 +49,10 @@ export function MappingTable({
         <tbody>
           {mappings.map((m) => (
             <tr key={m.fp_slot} className="border-b border-[var(--border)]">
-              <td className="py-2">{m.fp_slot}</td>
+              <td className="py-2 font-mono">{m.fp_slot}</td>
+              <td className="py-2 font-mono text-[var(--muted)]">
+                {m.externalId ?? "—"}
+              </td>
               <td className="py-2">{m.personLabel}</td>
               <td className="py-2 text-[var(--muted)]">
                 {new Date(m.enrolled_at).toLocaleString()}

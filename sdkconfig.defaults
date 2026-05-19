@@ -1,19 +1,24 @@
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 
-# Mixed WPA2/WPA3 routers (WPA2-only threshold fails on WPA3-only APs)
-CONFIG_ESP_WIFI_AUTH_WPA2_PSK=n
-CONFIG_ESP_WIFI_AUTH_WPA2_WPA3_PSK=y
-CONFIG_ESP_MAXIMUM_RETRY=10
-# Both families linked; APP_OLED_USE_SH1106 in app_oled.h picks setup at runtime
-CONFIG_U8G2_DISPLAY_DRIVER_ALL=y
+# 4MB flash on ESP32-C3 Super Mini; app needs >1MB (Wi-Fi + TLS)
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_SINGLE_APP=n
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
+
+# WPA2 home routers (same as original working build)
+CONFIG_ESP_WIFI_AUTH_WPA2_PSK=y
 
 # HW-466AB: USB-C is chip USB Serial/JTAG — use it for monitor input (not UART0 GPIO20/21).
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=n
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
-# Supabase cloud (override in menuconfig or NVS cloudurl / provision)
-CONFIG_CLOUD_SUPABASE_URL=""
+# Supabase cloud — set URL + publishable key here; device key via serial: provision KEY
+CONFIG_CLOUD_SUPABASE_URL="https://zadlhdxvuvmzrpsbrkbn.supabase.co"
+CONFIG_CLOUD_SUPABASE_PUBLISHABLE_KEY="sb_publishable_zIDvdOz0-cHaX0YbjVwffw_V0aIxU8H"
 CONFIG_CLOUD_DEVICE_API_KEY=""
 
 # TLS for *.supabase.co (Google Trust Services cross-signed chain)

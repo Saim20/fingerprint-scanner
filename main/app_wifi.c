@@ -2,16 +2,19 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
+#include "esp_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "sdkconfig.h"
 
+#include "app_buzzer.h"
 #include "app_oled.h"
 
 #define WIFI_TAG "app_wifi"
@@ -51,46 +54,24 @@
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num;
 static volatile bool s_connected;
+static bool s_had_connection;
 static uint32_t s_ip_addr;
+
+static void wifi_start_sntp(void)
+{
+    if (esp_sntp_enabled()) {
+        return;
+    }
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    ESP_LOGI(WIFI_TAG, "SNTP started");
+}
 
 static void wifi_show_oled(const char *line2, const char *line3)
 {
     if (app_oled_is_ready()) {
         app_oled_show_lines("WiFi", line2, line3, "");
-    }
-}
-
-static const char *wifi_reason_str(uint8_t reason)
-{
-    switch (reason) {
-    case WIFI_REASON_AUTH_EXPIRE:
-        return "auth expired";
-    case WIFI_REASON_AUTH_LEAVE:
-        return "auth leave";
-    case WIFI_REASON_ASSOC_EXPIRE:
-        return "assoc expired";
-    case WIFI_REASON_ASSOC_TOOMANY:
-        return "AP full";
-    case WIFI_REASON_NOT_AUTHED:
-        return "not authenticated";
-    case WIFI_REASON_NOT_ASSOCED:
-        return "not associated";
-    case WIFI_REASON_ASSOC_LEAVE:
-        return "assoc leave";
-    case WIFI_REASON_ASSOC_NOT_AUTHED:
-        return "assoc not authed";
-    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
-        return "4-way timeout (wrong password?)";
-    case WIFI_REASON_HANDSHAKE_TIMEOUT:
-        return "handshake timeout";
-    case WIFI_REASON_CONNECTION_FAIL:
-        return "connection fail";
-    case WIFI_REASON_AUTH_FAIL:
-        return "auth fail (wrong password or WPA mode?)";
-    case WIFI_REASON_NO_AP_FOUND:
-        return "SSID not found";
-    default:
-        return "see esp_wifi_types.h";
     }
 }
 
@@ -100,16 +81,11 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        const wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
+        if (s_had_connection) {
+            app_buzzer_beep_wifi(false);
+        }
         s_connected = false;
         s_ip_addr = 0;
-        ESP_LOGW(WIFI_TAG, "disconnected: reason=%u (%s)", (unsigned)disc->reason,
-                 wifi_reason_str(disc->reason));
-        if (disc->reason == WIFI_REASON_AUTH_FAIL ||
-            disc->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
-            disc->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
-            ESP_LOGW(WIFI_TAG, "check menuconfig SSID/password and set auth to WPA2/WPA3 if AP uses WPA3");
-        }
         if (s_retry_num < CONFIG_ESP_MAXIMUM_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
@@ -119,14 +95,18 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
             ESP_LOGW(WIFI_TAG, "failed after %d retries", CONFIG_ESP_MAXIMUM_RETRY);
             wifi_show_oled("Failed", CONFIG_ESP_WIFI_SSID);
+            app_buzzer_beep_error();
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_retry_num = 0;
         s_connected = true;
+        s_had_connection = true;
         s_ip_addr = event->ip_info.ip.addr;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         ESP_LOGI(WIFI_TAG, "connected, ip: " IPSTR, IP2STR(&event->ip_info.ip));
+        wifi_start_sntp();
+        app_buzzer_beep_wifi(true);
         char ip_line[20];
         snprintf(ip_line, sizeof(ip_line), IPSTR, IP2STR(&event->ip_info.ip));
         wifi_show_oled("Connected", ip_line);
@@ -204,4 +184,19 @@ bool app_wifi_ip_str(char *buf, size_t buf_len)
     esp_ip4_addr_t ip = {.addr = s_ip_addr};
     snprintf(buf, buf_len, IPSTR, IP2STR(&ip));
     return true;
+}
+
+bool app_wifi_wait_time_sync(uint32_t timeout_ms)
+{
+    const time_t min_valid = 1700000000; /* ~2023 — cert validation needs real time */
+    TickType_t start = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - start) * portTICK_PERIOD_MS < timeout_ms) {
+        time_t now = 0;
+        time(&now);
+        if (now >= min_valid) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    return false;
 }
