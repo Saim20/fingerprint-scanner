@@ -222,6 +222,7 @@ static void handle_device_record(cJSON *record)
 
     ESP_LOGI(RT_TAG, "push seq=%lld mode=%s slot=%u",
              (long long)cmd.command_seq, cmd.desired_mode, (unsigned)cmd.desired_fp_slot);
+    (void)app_cloud_request_sync();
     s_cmd_cb(&cmd, s_cmd_ctx);
 }
 

@@ -21,14 +21,17 @@ export function PeopleList({ people }: { people: Person[] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-[var(--muted)] border-b border-[var(--border)]">
+            <th className="py-3">ID</th>
             <th className="py-3">Name</th>
-            <th className="py-3">External ID</th>
             <th className="py-3 text-right">Actions</th>
           </tr>
         </thead>
         <tbody>
           {people.map((p) => (
             <tr key={p.id} className="border-b border-[var(--border)]">
+              <td className="py-3 font-mono text-xs text-[var(--muted)]">
+                {p.external_id ?? "—"}
+              </td>
               <td className="py-3">
                 <Link
                   href={`/dashboard/people/${p.id}`}
@@ -37,7 +40,6 @@ export function PeopleList({ people }: { people: Person[] }) {
                   {p.display_name}
                 </Link>
               </td>
-              <td className="py-3 text-[var(--muted)]">{p.external_id ?? "—"}</td>
               <td className="py-3 text-right">
                 <div className="flex justify-end gap-2">
                   <Link

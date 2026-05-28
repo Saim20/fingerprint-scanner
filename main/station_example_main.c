@@ -40,6 +40,7 @@ static app_cloud_sync_t s_pending_cmd;
 static int64_t s_last_auto_cmd_seq;
 static int64_t s_last_auto_attempt_tick;
 static int64_t s_last_notify_cmd_seq;
+static int64_t s_last_attendance_feedback_ms;
 
 static void show_status_screen(void);
 static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx);
@@ -50,6 +51,19 @@ static bool cloud_command_needs_go(const app_cloud_sync_t *cmd)
         return false;
     }
     return strcmp(cmd->desired_mode, "add") == 0 || strcmp(cmd->desired_mode, "scan") == 0;
+}
+
+#define ATTENDANCE_FEEDBACK_COOLDOWN_MS 2800
+
+static bool attendance_feedback_cooldown(void)
+{
+    int64_t now = (int64_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    return (now - s_last_attendance_feedback_ms) < ATTENDANCE_FEEDBACK_COOLDOWN_MS;
+}
+
+static void mark_attendance_feedback(void)
+{
+    s_last_attendance_feedback_ms = (int64_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
 static bool attendance_paused(void)
@@ -221,7 +235,6 @@ static bool run_enroll(uint16_t slot_id)
         return false;
     }
 
-    /* 0788220 treated all captures OK as success — IDENTIFY often stays NOUSER on this module. */
     (void)app_fp_mark_slot_enrolled(slot_id);
     sync_template_count();
     uint8_t stored = 0;
@@ -253,23 +266,25 @@ static void handle_match(uint16_t user_id)
             msg_user("[CLOUD] attendance queued\n");
         } else {
             msg_user("[CLOUD] queue failed\n");
-            app_buzzer_beep_warn();
+            app_buzzer_beep_busy();
         }
     }
     char line2[24];
     snprintf(line2, sizeof(line2), "slot %u", (unsigned)user_id);
     app_oled_show_lines("MATCH", label ? label : "OK", line2, "");
-    app_buzzer_beep_ok();
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    app_buzzer_beep_attendance_ok();
+    mark_attendance_feedback();
+    vTaskDelay(pdMS_TO_TICKS(900));
     show_status_screen();
 }
 
 static void handle_no_match(void)
 {
     msg_user("[SCAN] No match\n");
-    app_buzzer_beep_no_match();
+    app_buzzer_beep_attendance_unknown();
+    mark_attendance_feedback();
     app_oled_show_lines("NO MATCH", "Unknown", "finger", "");
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    vTaskDelay(pdMS_TO_TICKS(700));
     if (!s_busy) {
         show_status_screen();
     }
@@ -453,8 +468,8 @@ static void run_pending_cloud_command(void)
 static void on_cloud_settings(void *ctx)
 {
     (void)ctx;
-    if (s_startup_done) {
-        app_buzzer_beep_mode(app_cloud_background_scan_enabled());
+    if (s_startup_done && !app_cloud_background_scan_enabled()) {
+        app_buzzer_beep_command_mode();
     }
     if (!s_busy) {
         show_status_screen();
@@ -497,7 +512,7 @@ static void on_cloud_sync(const app_cloud_sync_t *sync, void *ctx)
             memcpy(last.stale, sync->stale_slots, sizeof(last.stale));
             ESP_LOGI(TAG, "cloud: template drift — %u unmapped, %u stale (map in web UI)",
                      (unsigned)sync->unmapped_count, (unsigned)sync->stale_count);
-            if (s_startup_done) {
+            if (s_startup_done && !attendance_feedback_cooldown()) {
                 app_buzzer_beep_warn();
             }
         }
@@ -917,7 +932,12 @@ static void attendance_task(void *arg)
             }
             uint16_t user_id = 0;
             bool matched = false;
-            esp_err_t err = app_fp_search(&user_id, &matched);
+            if (attendance_feedback_cooldown()) {
+                vTaskDelay(pdMS_TO_TICKS(400));
+                continue;
+            }
+
+            esp_err_t err = app_fp_search_attendance(&user_id, &matched);
             if (err == ESP_OK && matched) {
                 s_busy = true;
                 app_cloud_set_busy(true);
@@ -962,7 +982,7 @@ void app_main(void)
     esp_err_t oled_err = app_oled_init();
     if (oled_err != ESP_OK) {
         msg_user("[BOOT] External OLED not detected (%s)\n", esp_err_to_name(oled_err));
-        msg_user("  SDA=GPIO5 SCL=GPIO6 VCC=3V3 GND=GND (not a built-in display)\n");
+        msg_user("  SDA=GPIO5 SCL=GPIO6 VCC=3V3 GND=GND (+ 4.7k pull-ups if needed)\n");
     }
 
     if (app_wifi_init() != ESP_OK) {

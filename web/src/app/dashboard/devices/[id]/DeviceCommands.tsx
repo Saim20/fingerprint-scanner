@@ -1,39 +1,71 @@
 "use client";
 
+import { useDeviceSyncContext } from "@/components/device/DeviceSyncContext";
 import { setDeviceBackgroundScan } from "@/lib/actions/admin";
 import { createClient } from "@/lib/supabase/client";
-import type { DeviceMode, Person } from "@/lib/types";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { externalIdKey, sortPeopleByExternalId } from "@/lib/sort-people";
+import { commandFinished, hasPendingCommand } from "@/lib/device-status";
+import type { Device, DeviceMode } from "@/lib/types";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-export function DeviceCommands({
-  deviceId,
-  people,
-  reportedSlots = [],
-  backgroundScan = false,
-}: {
-  deviceId: string;
-  people: Person[];
-  reportedSlots?: number[];
-  backgroundScan?: boolean;
-}) {
-  const router = useRouter();
-  const [personId, setPersonId] = useState(people[0]?.id ?? "");
-  const [fpSlot, setFpSlot] = useState(0);
+function personLabel(p: { display_name: string; external_id: string | null }) {
+  const id = externalIdKey(p.external_id);
+  return id ? `${p.display_name} (${id})` : p.display_name;
+}
 
-  const selectedPerson = people.find((p) => p.id === personId);
-  const preferredSlot = (() => {
-    const ext = selectedPerson?.external_id?.trim();
-    if (!ext) return null;
-    const n = Number(ext);
-    if (Number.isInteger(n) && n >= 1 && n <= 150) return n;
-    return null;
-  })();
+export function DeviceCommands() {
+  const { deviceId, device, people, reportedSlots } = useDeviceSyncContext();
+  const sortedPeople = useMemo(() => sortPeopleByExternalId(people), [people]);
+  const [personId, setPersonId] = useState(sortedPeople[0]?.id ?? "");
   const [deleteSlot, setDeleteSlot] = useState(reportedSlots[0] ?? 1);
   const [loading, setLoading] = useState(false);
   const [bgLoading, setBgLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sentHint, setSentHint] = useState<string | null>(null);
+  const devicePrevRef = useRef<Device>(device);
+  const lastIssuedRef = useRef<DeviceMode | null>(null);
+
+  const backgroundScan = device.background_scan ?? false;
+
+  useEffect(() => {
+    const prev = devicePrevRef.current;
+    if (commandFinished(prev, device)) {
+      const mode = lastIssuedRef.current ?? (prev.desired_mode as DeviceMode);
+      lastIssuedRef.current = null;
+      if (mode === "clear") {
+        setSentHint("All fingerprints cleared on the device.");
+      } else if (mode === "delete") {
+        setSentHint("Fingerprint removed on the device.");
+      } else if (mode === "add" || mode === "scan") {
+        setSentHint(null);
+      }
+      const t = setTimeout(() => setSentHint(null), 3500);
+      devicePrevRef.current = device;
+      return () => clearTimeout(t);
+    }
+    if (!hasPendingCommand(device)) {
+      setSentHint((h) =>
+        h && (h.includes("press GO") || h.includes("Clearing") || h.includes("Deleting"))
+          ? null
+          : h,
+      );
+    }
+    devicePrevRef.current = device;
+  }, [device]);
+
+  useEffect(() => {
+    if (reportedSlots.length > 0) {
+      setDeleteSlot((prev) =>
+        reportedSlots.includes(prev) ? prev : reportedSlots[0],
+      );
+    }
+  }, [reportedSlots]);
+
+  useEffect(() => {
+    if (sortedPeople.length && !sortedPeople.some((p) => p.id === personId)) {
+      setPersonId(sortedPeople[0]?.id ?? "");
+    }
+  }, [sortedPeople, personId]);
 
   async function toggleBackgroundScan(enabled: boolean) {
     setBgLoading(true);
@@ -50,7 +82,6 @@ export function DeviceCommands({
         ? "Passive scan enabled — device will clock in when a finger is placed."
         : "Command mode — device only runs dashboard commands.",
     );
-    router.refresh();
   }
 
   async function issue(
@@ -60,6 +91,7 @@ export function DeviceCommands({
     setLoading(true);
     setError(null);
     setSentHint(null);
+    lastIssuedRef.current = mode;
     const supabase = createClient();
     const { error: rpcError } = await supabase.rpc("issue_device_command", {
       p_device_id: deviceId,
@@ -76,13 +108,12 @@ export function DeviceCommands({
     if (mode === "idle") {
       setSentHint("Command queue cleared on the device.");
     } else if (mode === "delete") {
-      setSentHint(`Delete slot ${opts?.fpSlot ?? deleteSlot} sent — device removes it via Realtime.`);
+      setSentHint(`Deleting slot ${opts?.fpSlot ?? deleteSlot} — UI updates when the device confirms.`);
     } else if (mode === "clear") {
-      setSentHint("Clear all sent — device wipes templates via Realtime.");
+      setSentHint("Clearing all fingerprints — UI updates when the device confirms.");
     } else {
       setSentHint("Command queued — press GO on the scanner to start.");
     }
-    router.refresh();
   }
 
   return (
@@ -90,9 +121,9 @@ export function DeviceCommands({
       <div>
         <h2 className="text-lg font-medium">Device control</h2>
         <p className="text-sm text-[var(--muted)] font-mono mb-2">Device ID: {deviceId}</p>
-      <p className="text-sm text-[var(--muted)] mt-1">
-          Enroll and test scan need GO on the scanner. Delete, clear all, and cancel run from the
-          cloud automatically. Use <strong>Cancel command</strong> to clear a stuck queue.
+        <p className="text-sm text-[var(--muted)] mt-1">
+          Enroll and test scan need GO on the scanner. The device picks a free fingerprint slot
+          automatically. Delete, clear all, and cancel run from the cloud automatically.
         </p>
       </div>
 
@@ -128,48 +159,21 @@ export function DeviceCommands({
           value={personId}
           onChange={(e) => setPersonId(e.target.value)}
         >
-          {people.length === 0 ? (
+          {sortedPeople.length === 0 ? (
             <option value="">Create a person first</option>
           ) : (
-            people.map((p) => {
-              const ext = p.external_id?.trim();
-              const slot =
-                ext && Number.isInteger(Number(ext)) && Number(ext) >= 1 && Number(ext) <= 150
-                  ? Number(ext)
-                  : null;
-              return (
-                <option key={p.id} value={p.id}>
-                  {p.display_name}
-                  {slot != null ? ` → slot ${slot}` : ext ? ` (${ext})` : ""}
-                </option>
-              );
-            })
+            sortedPeople.map((p) => (
+              <option key={p.id} value={p.id}>
+                {personLabel(p)}
+              </option>
+            ))
           )}
         </select>
-        <label className="label">FP slot (0 = use external ID or auto)</label>
-        <input
-          type="number"
-          className="input"
-          min={0}
-          max={150}
-          value={fpSlot}
-          onChange={(e) => setFpSlot(Number(e.target.value))}
-        />
-        {preferredSlot != null && fpSlot === 0 && (
-          <p className="text-xs text-[var(--muted)]">
-            Will enroll on device slot <strong>{preferredSlot}</strong> (from external ID).
-          </p>
-        )}
         <button
           type="button"
           className="btn btn-primary"
           disabled={loading || !personId}
-          onClick={() =>
-            issue("add", {
-              personId,
-              fpSlot: fpSlot > 0 ? fpSlot : preferredSlot ?? 0,
-            })
-          }
+          onClick={() => issue("add", { personId, fpSlot: 0 })}
         >
           Queue enroll
         </button>

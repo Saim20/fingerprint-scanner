@@ -35,6 +35,31 @@ supabase db push
 
 If you see *"Connect to your database by setting the env var correctly: SUPABASE_DB_PASSWORD"*, the variable is missing, wrong, or has extra quotes/whitespace.
 
+### `permission denied to alter role` / `cli_login_postgres` (400)
+
+Some hosted projects reject the CLI’s automatic login-role setup. You do **not** need `db push` for CSV import (the web app uses select/update/insert). For schema changes, use either:
+
+**A — SQL Editor (simplest)**  
+Dashboard → **SQL** → New query → paste the migration file → Run.
+
+Required for live enrollment roster updates on the People page:
+
+```sql
+alter publication supabase_realtime add table public.fp_mappings;
+```
+
+(Also in `migrations/20250520110000_realtime_fp_mappings.sql`.)
+
+**B — Direct URL (bypass login role)**  
+Dashboard → **Database** → **Connection string** → URI (Session mode). Then:
+
+```bash
+export SUPABASE_DB_PASSWORD='your-database-password'
+supabase db push --db-url "postgresql://postgres.YOUR_REF:${SUPABASE_DB_PASSWORD}@aws-0-REGION.pooler.supabase.com:5432/postgres"
+```
+
+Replace `YOUR_REF`, `REGION`, and password. Update the CLI: `supabase update`.
+
 ## Apply schema
 
 ```bash

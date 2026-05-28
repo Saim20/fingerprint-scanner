@@ -1,38 +1,24 @@
 "use client";
 
+import { useDeviceSyncContext } from "@/components/device/DeviceSyncContext";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { assignMapping, clearStaleMappings } from "@/lib/actions/admin";
-import type { Person } from "@/lib/types";
-import { useRouter } from "next/navigation";
+import { externalIdKey } from "@/lib/sort-people";
 import { useMemo, useState } from "react";
-
-type MappingRow = {
-  fp_slot: number;
-  person_id: string;
-  personLabel: string;
-  externalId: string | null;
-};
-
-function parsePreferredSlot(externalId: string | null): number | null {
-  if (!externalId) return null;
-  const n = Number(externalId.trim());
-  if (Number.isInteger(n) && n >= 1 && n <= 150) return n;
-  return null;
-}
 
 function DriftAlerts({
   unmappedSlots,
   staleSlots,
   deviceId,
   setError,
+  onStaleCleared,
 }: {
   unmappedSlots: number[];
   staleSlots: number[];
   deviceId: string;
   setError: (s: string | null) => void;
+  onStaleCleared: () => void;
 }) {
-  const router = useRouter();
-
   return (
     <div className="space-y-3 text-sm">
       {unmappedSlots.length > 0 && (
@@ -66,7 +52,7 @@ function DriftAlerts({
                 setError(result.error);
                 return;
               }
-              router.refresh();
+              onStaleCleared();
             }}
           />
         </div>
@@ -75,26 +61,16 @@ function DriftAlerts({
   );
 }
 
-export function TemplateSyncPanel({
-  deviceId,
-  reportedSlots,
-  reportedCount,
-  lastSyncAt,
-  mappings,
-  people,
-}: {
-  deviceId: string;
-  reportedSlots: number[];
-  reportedCount: number | null;
-  lastSyncAt: string | null;
-  mappings: MappingRow[];
-  people: Person[];
-}) {
-  const router = useRouter();
+export function TemplateSyncPanel() {
+  const { deviceId, device, mappings, reportedSlots, people, refreshMappings } =
+    useDeviceSyncContext();
   const [error, setError] = useState<string | null>(null);
   const [assignSlot, setAssignSlot] = useState<number | "">("");
   const [assignPerson, setAssignPerson] = useState(people[0]?.id ?? "");
   const [loading, setLoading] = useState(false);
+
+  const lastSyncAt = device.last_template_sync_at ?? null;
+  const reportedCount = device.reported_fp_count ?? null;
 
   const mappedSlots = useMemo(
     () => new Set(mappings.map((m) => m.fp_slot)),
@@ -125,7 +101,7 @@ export function TemplateSyncPanel({
       setError(result.error);
       return;
     }
-    router.refresh();
+    await refreshMappings();
   }
 
   return (
@@ -164,6 +140,7 @@ export function TemplateSyncPanel({
           staleSlots={staleSlots}
           deviceId={deviceId}
           setError={setError}
+          onStaleCleared={() => refreshMappings()}
         />
       ) : (
         reportedSlots.length > 0 && (
@@ -197,12 +174,11 @@ export function TemplateSyncPanel({
             onChange={(e) => setAssignPerson(e.target.value)}
           >
             {people.map((p) => {
-              const pref = parsePreferredSlot(p.external_id);
+              const id = externalIdKey(p.external_id);
               return (
                 <option key={p.id} value={p.id}>
                   {p.display_name}
-                  {pref != null ? ` (slot ${pref})` : ""}
-                  {p.external_id && pref == null ? ` — ${p.external_id}` : ""}
+                  {id ? ` — ${id}` : ""}
                 </option>
               );
             })}
@@ -214,8 +190,8 @@ export function TemplateSyncPanel({
       </form>
 
       <p className="text-xs text-[var(--muted)]">
-        Tip: set a person&apos;s <strong>External ID</strong> to a number 1–150 to use that
-        device slot automatically for remote enroll.
+        Tip: use <strong>External ID</strong> as a string label (e.g. EMP-042) for roster sorting.
+        Fingerprint slots are assigned automatically on the device when enrolling.
       </p>
     </section>
   );

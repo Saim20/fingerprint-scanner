@@ -11,7 +11,7 @@
  *   GPIO2–3 — spare
  *
  * GPIO2 is a strapping pin — avoid holding it low at reset.
- * Avoid GPIO4/7 (fingerprint UART), GPIO8/9 (LED), GPIO10 (buzzer).
+ * Avoid GPIO4/7 (fingerprint UART), GPIO5/6 (OLED I2C), GPIO10 (buzzer).
  */
 #define APP_BTN_PIN_GO          0
 #define APP_BTN_PIN_ENROLL      1

@@ -5,6 +5,7 @@
 /**
  * External I2C SH1106 OLED (1.3" 128x64).
  * Default: SDA=GPIO5, SCL=GPIO6, VCC=3V3, GND=GND.
+ * Add 4.7k from SDA and SCL to 3V3 if the module has no pull-ups (required on many boards).
  *
  * Many boards label the address as 0x78 / 0x7A on silkscreen (8-bit write
  * address). Jumper on 0x78 → I2C 7-bit address 0x3C (what we probe).

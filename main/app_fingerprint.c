@@ -27,7 +27,6 @@
 #define FP_CMD_USERNUMB    0x09
 #define FP_CMD_IDENTIFY    0x0B
 #define FP_CMD_SEARCH      0x0C
-#define FP_CMD_GET_IMAGE   0x23
 #define FP_CMD_SET_TIMEOUT 0x2E
 /*
  * Capture-timeout reg (CMD 0x2E). Module multiplies by T0 (~0.2-0.3 s) to get
@@ -151,7 +150,6 @@ static uint8_t fp_check_package(uint8_t cmd)
             return FP_ACK_SUCCESS;
         }
         return s_rx_buf[4];
-    case FP_CMD_GET_IMAGE:
     case FP_CMD_DELETE:
     case FP_CMD_CLEAR:
     case FP_CMD_SET_TIMEOUT:
@@ -295,7 +293,7 @@ static esp_err_t fp_run_cmd(uint8_t cmd, uint16_t arg, uint8_t arg_byte3)
     } else if (cmd == FP_CMD_DELETE || cmd == FP_CMD_CLEAR) {
         timeout_ms = 8000;
     } else if (cmd == FP_CMD_ENROLL1 || cmd == FP_CMD_ENROLL2 || cmd == FP_CMD_ENROLL3 ||
-               cmd == FP_CMD_GET_IMAGE || cmd == FP_CMD_IDENTIFY || cmd == FP_CMD_SEARCH) {
+               cmd == FP_CMD_IDENTIFY || cmd == FP_CMD_SEARCH) {
         timeout_ms = 20000;
     }
     return fp_run_cmd_timeout(cmd, arg, arg_byte3, timeout_ms, true);
@@ -528,11 +526,6 @@ bool app_fp_is_ready(void)
     return s_ready;
 }
 
-uint16_t app_fp_last_user_id(void)
-{
-    return s_last_user_id;
-}
-
 uint8_t app_fp_last_ack(void)
 {
     return s_last_ack;
@@ -558,19 +551,6 @@ const char *app_fp_ack_str(uint8_t ack)
     default:
         return "unknown error";
     }
-}
-
-esp_err_t app_fp_test_sensor(void)
-{
-    if (!s_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(25000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    esp_err_t err = fp_run_cmd_timeout(FP_CMD_GET_IMAGE, 0, 0, 20000, true);
-    xSemaphoreGive(s_lock);
-    return err;
 }
 
 esp_err_t app_fp_alloc_enroll_slot(uint16_t *out_slot)
@@ -619,58 +599,6 @@ esp_err_t app_fp_alloc_enroll_slot(uint16_t *out_slot)
     return ESP_ERR_NOT_FOUND;
 }
 
-static uint8_t fp_enroll_cmd_for_capture(int capture_idx)
-{
-    if (capture_idx == 0) {
-        return FP_CMD_ENROLL1;
-    }
-    if (capture_idx < 5) {
-        return FP_CMD_ENROLL2;
-    }
-    return FP_CMD_ENROLL3;
-}
-
-static esp_err_t fp_enroll_cmd_locked(uint16_t slot_id, uint8_t cmd, int capture_idx)
-{
-    (void)capture_idx;
-    esp_err_t err = ESP_ERR_TIMEOUT;
-    const int max_tries = APP_FP_ENROLL_MAX_TRIES;
-
-    for (int attempt = 1; attempt <= max_tries; attempt++) {
-        bool flush = (attempt > 1);
-        err = fp_run_cmd_timeout(cmd, slot_id, 1, 20000, flush);
-        if (err == ESP_OK) {
-            break;
-        }
-        if (s_last_ack != FP_ACK_FAIL && s_last_ack != FP_ACK_TIMEOUT && err != ESP_ERR_TIMEOUT) {
-            break;
-        }
-        ESP_LOGI(FP_TAG, "enroll cap %d/%d try %d/%d: %s",
-                 capture_idx + 1, APP_FP_ENROLL_CAPTURES, attempt, max_tries,
-                 err == ESP_ERR_TIMEOUT ? "no response" : app_fp_ack_str(s_last_ack));
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    return err;
-}
-
-esp_err_t app_fp_enroll_capture(uint16_t slot_id, int capture_idx)
-{
-    if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID ||
-        capture_idx < 0 || capture_idx >= APP_FP_ENROLL_CAPTURES) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(120000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    uint8_t cmd = fp_enroll_cmd_for_capture(capture_idx);
-    esp_err_t err = fp_enroll_cmd_locked(slot_id, cmd, capture_idx);
-    xSemaphoreGive(s_lock);
-    return err;
-}
-
 esp_err_t app_fp_enroll_step(uint16_t slot_id, int step)
 {
     if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID || step < 1 ||
@@ -712,11 +640,6 @@ esp_err_t app_fp_enroll_step(uint16_t slot_id, int step)
     return err;
 }
 
-esp_err_t app_fp_enroll_legacy_step(uint16_t slot_id, int step)
-{
-    return app_fp_enroll_step(slot_id, step);
-}
-
 esp_err_t app_fp_mark_slot_enrolled(uint16_t slot_id)
 {
     if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
@@ -742,25 +665,12 @@ esp_err_t app_fp_enroll(uint16_t slot_id)
     return app_fp_mark_slot_enrolled(slot_id);
 }
 
-esp_err_t app_fp_identify(uint16_t slot_id)
-{
-    if (!s_ready || slot_id < APP_FP_MIN_USER_ID || slot_id > APP_FP_MAX_USER_ID) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(25000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    esp_err_t err = fp_run_cmd_timeout(FP_CMD_IDENTIFY, slot_id, 0, 20000, true);
-    xSemaphoreGive(s_lock);
-    return err;
-}
-
 bool app_fp_last_search_had_finger(void)
 {
     return s_last_search_had_finger;
 }
 
-esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
+static esp_err_t fp_search_impl(uint16_t *out_id, bool *matched, bool placement_delay, int max_tries)
 {
     if (!s_ready || out_id == NULL || matched == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -772,13 +682,14 @@ esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
         return ESP_ERR_TIMEOUT;
     }
 
-    /* User needs time to move finger from button to sensor after "scan". */
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    if (placement_delay) {
+        /* Dashboard test scan: user presses GO then moves finger to sensor. */
+        vTaskDelay(pdMS_TO_TICKS(1200));
+    }
 
     esp_err_t err = ESP_FAIL;
     esp_err_t last_err = ESP_FAIL;
-    for (int try_n = 1; try_n <= 12; try_n++) {
-        /* Only flush UART before the first attempt — retries may have a late reply. */
+    for (int try_n = 1; try_n <= max_tries; try_n++) {
         err = fp_run_cmd_timeout(FP_CMD_SEARCH, 0, 0, 20000, try_n == 1);
         last_err = err;
         if (err == ESP_OK) {
@@ -790,7 +701,7 @@ esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
         if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_TIMEOUT) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(placement_delay ? 500 : 300));
     }
 
     if (last_err == ESP_ERR_NOT_FOUND || last_err == ESP_ERR_TIMEOUT) {
@@ -803,6 +714,16 @@ esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
 
     xSemaphoreGive(s_lock);
     return err;
+}
+
+esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
+{
+    return fp_search_impl(out_id, matched, true, 12);
+}
+
+esp_err_t app_fp_search_attendance(uint16_t *out_id, bool *matched)
+{
+    return fp_search_impl(out_id, matched, false, 8);
 }
 
 esp_err_t app_fp_delete(uint16_t slot_id)

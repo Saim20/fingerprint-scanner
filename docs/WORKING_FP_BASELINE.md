@@ -28,7 +28,6 @@ When merging into `main`, **preserve enroll UART behavior from this baseline**; 
 | `app_fp_enroll_step` | Direct `ENROLL1/2/3` by `step`; refresh count on step 3 only |
 | `app_fp_enroll` | Loop steps 1..3 calling `app_fp_enroll_step` |
 | `app_fp_search` | 1200 ms delay before SEARCH; 12 tries; flush only on try 1 |
-| `app_fp_test_sensor` | `GET_IMAGE` — **only** for `touch` command, never mid-enroll |
 | `fp_run_cmd` | Enroll/GET_IMAGE/IDENTIFY/SEARCH → 20 s timeout; always `flush_rx=true` on first call via `fp_run_cmd` |
 
 ### Frame / ACK
@@ -59,7 +58,7 @@ run_enroll(slot_id):
 ## Hardware (unchanged on main)
 
 - UART: **19200**, TX **GPIO4**, RX **GPIO7**, `APP_FP_SWAP_TX_RX=0`
-- OLED: SDA **GPIO5**, SCL **GPIO6**
+- OLED: SDA **GPIO5**, SCL **GPIO6** (4.7k pull-ups to 3V3 if no ACK)
 - Buzzer: **GPIO10**
 
 ---

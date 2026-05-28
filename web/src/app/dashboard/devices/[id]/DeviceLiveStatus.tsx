@@ -1,27 +1,35 @@
 "use client";
 
-import { createClient } from "@/lib/supabase/client";
-import { hasPendingCommand, isDeviceOnline } from "@/lib/device-status";
-import type { Device, DeviceMode, Person } from "@/lib/types";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useDeviceSyncContext } from "@/components/device/DeviceSyncContext";
+import {
+  commandNeedsGo,
+  hasPendingCommand,
+  isDeviceOnline,
+} from "@/lib/device-status";
+import { externalIdKey } from "@/lib/sort-people";
+import type { DeviceMode } from "@/lib/types";
 
-function pendingMessage(device: Device, people: Person[]): string | null {
+function pendingMessage(
+  device: ReturnType<typeof useDeviceSyncContext>["device"],
+  people: ReturnType<typeof useDeviceSyncContext>["people"],
+): string | null {
   if (!hasPendingCommand(device)) return null;
 
   const mode = device.desired_mode as DeviceMode;
   const slot = device.desired_fp_slot;
   const person = people.find((p) => p.id === device.desired_person_id);
+  const personLabel = person
+    ? (() => {
+        const id = externalIdKey(person.external_id);
+        return id ? `${person.display_name} (${id})` : person.display_name;
+      })()
+    : null;
 
   switch (mode) {
     case "add":
-      return person
-        ? slot > 0
-          ? `Enroll ${person.display_name} on slot ${slot} — press GO on the device`
-          : `Enroll ${person.display_name} — press GO on the device`
-        : slot > 0
-          ? `Enroll queued on slot ${slot} — press GO on the device`
-          : "Enroll queued — press GO on the device";
+      return personLabel
+        ? `Enroll ${personLabel} — press GO on the device (slot assigned automatically)`
+        : "Enroll queued — press GO on the device";
     case "scan":
       return "Test scan queued — press GO on the device";
     case "delete":
@@ -30,65 +38,27 @@ function pendingMessage(device: Device, people: Person[]): string | null {
         : "Delete queued — running on device…";
     case "clear":
       return "Clearing all fingerprints on device…";
+    case "idle":
+      return "Cancelling command on device…";
     default:
-      return "Command pending — press GO on the device";
+      return "Command running on device…";
   }
 }
 
-export function DeviceLiveStatus({
-  initialDevice,
-  people,
-}: {
-  initialDevice: Device;
-  people: Person[];
-}) {
-  const router = useRouter();
-  const [device, setDevice] = useState(initialDevice);
+function pendingSubtext(mode: DeviceMode | string): string {
+  if (commandNeedsGo(mode)) {
+    return "Press the GO button (GPIO0) on the scanner to start enroll or test scan.";
+  }
+  return "Runs automatically on the device when online — no GO button needed.";
+}
 
-  useEffect(() => {
-    setDevice(initialDevice);
-  }, [initialDevice]);
-
-  useEffect(() => {
-    const supabase = createClient();
-
-    async function reload() {
-      const { data } = await supabase
-        .from("devices")
-        .select("*")
-        .eq("id", initialDevice.id)
-        .single();
-      if (data) {
-        setDevice(data as Device);
-      }
-    }
-
-    const channel = supabase
-      .channel(`device-${initialDevice.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "devices",
-          filter: `id=eq.${initialDevice.id}`,
-        },
-        () => {
-          reload();
-          router.refresh();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [initialDevice.id, router]);
+export function DeviceLiveStatus() {
+  const { device, people, reportedSlots } = useDeviceSyncContext();
 
   const online = isDeviceOnline(device);
   const pending = hasPendingCommand(device);
   const pendingText = pendingMessage(device, people);
-  const reportedSlots = (device.reported_fp_slots ?? []).map(Number).sort((a, b) => a - b);
+  const mode = device.desired_mode as DeviceMode;
 
   return (
     <div className="space-y-3 mb-6">
@@ -112,11 +82,7 @@ export function DeviceLiveStatus({
       {pendingText && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm">
           <p className="font-medium text-amber-300">{pendingText}</p>
-          <p className="text-[var(--muted)] mt-1">
-            {device.desired_mode === "delete" || device.desired_mode === "clear"
-              ? "The device receives this instantly via Supabase Realtime."
-              : "Press the GO button (GPIO0) on the scanner to start enroll or test scan."}
-          </p>
+          <p className="text-[var(--muted)] mt-1">{pendingSubtext(mode)}</p>
         </div>
       )}
 

@@ -1,23 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
+import { toMappingRows } from "@/lib/mapping-rows";
+import { sortPeopleByExternalId } from "@/lib/sort-people";
 import type { Device, Person } from "@/lib/types";
 import Link from "next/link";
-import { DeviceCommands } from "./DeviceCommands";
-import { ApiKeyBanner } from "./ApiKeyBanner";
-import { DeviceLiveStatus } from "./DeviceLiveStatus";
-import { DeviceManagePanel } from "./DeviceManagePanel";
-import { MappingTable } from "./MappingTable";
-import { TemplateSyncPanel } from "./TemplateSyncPanel";
-
-function personFields(
-  people:
-    | { display_name: string; external_id: string | null }
-    | { display_name: string; external_id: string | null }[]
-    | null,
-): { display_name: string; external_id: string | null } | null {
-  if (!people) return null;
-  if (Array.isArray(people)) return people[0] ?? null;
-  return people;
-}
+import { DeviceDetailClient } from "./DeviceDetailClient";
 
 export default async function DeviceDetailPage({
   params,
@@ -36,10 +22,8 @@ export default async function DeviceDetailPage({
     .eq("id", id)
     .single();
 
-  const { data: people } = await supabase
-    .from("people")
-    .select("*")
-    .order("display_name");
+  const { data: peopleRaw } = await supabase.from("people").select("*");
+  const people = sortPeopleByExternalId((peopleRaw ?? []) as Person[]);
 
   const { data: mappings } = await supabase
     .from("fp_mappings")
@@ -52,19 +36,7 @@ export default async function DeviceDetailPage({
   }
 
   const d = device as Device;
-  const mappingRows =
-    mappings?.map((m) => {
-      const p = personFields(m.people);
-      return {
-        fp_slot: m.fp_slot,
-        person_id: m.person_id,
-        enrolled_at: m.enrolled_at,
-        personLabel: p?.display_name ?? m.person_id,
-        externalId: p?.external_id ?? null,
-      };
-    }) ?? [];
-
-  const reportedSlots = (d.reported_fp_slots ?? []).map(Number).sort((a, b) => a - b);
+  const mappingRows = toMappingRows(mappings);
 
   return (
     <div>
@@ -74,32 +46,12 @@ export default async function DeviceDetailPage({
       <h1 className="text-2xl font-semibold mt-2 mb-1">{d.name}</h1>
       <p className="text-sm text-[var(--muted)] mb-2 font-mono">{d.id}</p>
 
-      <DeviceLiveStatus initialDevice={d} people={(people ?? []) as Person[]} />
-
-      {apiKey && <ApiKeyBanner apiKey={apiKey} deviceId={d.id} />}
-
-      <DeviceCommands
-        deviceId={d.id}
-        people={(people ?? []) as Person[]}
-        reportedSlots={reportedSlots}
-        backgroundScan={d.background_scan ?? false}
+      <DeviceDetailClient
+        device={d}
+        people={people}
+        mappingRows={mappingRows}
+        apiKey={apiKey}
       />
-
-      <TemplateSyncPanel
-        deviceId={d.id}
-        reportedSlots={reportedSlots}
-        reportedCount={d.reported_fp_count ?? null}
-        lastSyncAt={d.last_template_sync_at ?? null}
-        mappings={mappingRows}
-        people={(people ?? []) as Person[]}
-      />
-
-      <section className="mt-8">
-        <h2 className="text-lg font-medium mb-3">Fingerprint mappings</h2>
-        <MappingTable deviceId={d.id} mappings={mappingRows} />
-      </section>
-
-      <DeviceManagePanel deviceId={d.id} deviceName={d.name} />
     </div>
   );
 }

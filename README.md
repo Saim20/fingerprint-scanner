@@ -35,7 +35,7 @@ HTTP sync still runs as fallback (attendance upload, template drift, person name
 ## Hardware
 
 - **MCU:** ESP32-C3 Super Mini (4 MB flash)
-- **Display:** external I2C SH1106 128×64 — SDA GPIO5, SCL GPIO6, 3V3/GND
+- **Display:** external I2C SH1106 128×64 — SDA GPIO5, SCL GPIO6, 3V3/GND; **4.7 kΩ** pull-ups on SDA/SCL to 3V3 if the module has none
 - **Buzzer:** passive piezo on **GPIO10** (+ to GPIO10, − to GND). PWM via LEDC (~2.7 kHz). Use a **passive** buzzer — an active buzzer that beeps on DC will not work.
 - **Sensor:** fingerprint module on UART (see `app_fingerprint.c`)
 

@@ -5,11 +5,9 @@ import { deleteDevice } from "@/lib/actions/admin";
 import { hasPendingCommand, isDeviceOnline } from "@/lib/device-status";
 import type { Device } from "@/lib/types";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 export function DeviceList({ devices }: { devices: Device[] }) {
-  const router = useRouter();
   const [error, setError] = useState<string | null>(null);
 
   if (!devices.length) {
@@ -87,7 +85,6 @@ export function DeviceList({ devices }: { devices: Device[] }) {
                           setError(result.error);
                           return;
                         }
-                        router.refresh();
                       }}
                     />
                   </div>

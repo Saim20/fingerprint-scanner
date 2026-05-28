@@ -69,7 +69,8 @@ export function PersonManagePanel({
 
       <div className="pt-4 border-t border-[var(--border)]">
         <p className="text-sm text-[var(--muted)] mb-3">
-          Deletes this person and all fingerprint mappings linked to them.
+          Deletes this person and queues removal of their fingerprint template on each
+          enrolled device (runs automatically when the device is online).
         </p>
         <ConfirmButton
           label="Delete person"

@@ -937,15 +937,6 @@ const char *app_cloud_slot_label(uint16_t fp_slot)
     return buf;
 }
 
-const char *app_cloud_slot_person_id(uint16_t fp_slot)
-{
-    if (fp_slot < APP_FP_MIN_USER_ID || fp_slot > APP_FP_MAX_USER_ID) {
-        return NULL;
-    }
-    const app_cloud_mapping_t *m = &s_slot_map[fp_slot - APP_FP_MIN_USER_ID];
-    return m->person_id[0] != '\0' ? m->person_id : NULL;
-}
-
 esp_err_t app_cloud_ack(int64_t command_seq)
 {
     cloud_msg_t msg = {.type = CLOUD_MSG_ACK, .command_seq = command_seq};

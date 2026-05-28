@@ -73,6 +73,3 @@ bool app_cloud_has_pending(const app_cloud_sync_t *sync);
 
 /** Label for OLED/serial: external_id, display_name, or "slot N". */
 const char *app_cloud_slot_label(uint16_t fp_slot);
-
-/** Person UUID for slot, or NULL if unmapped. */
-const char *app_cloud_slot_person_id(uint16_t fp_slot);
