@@ -37,6 +37,8 @@ static app_realtime_command_cb_t s_cmd_cb;
 static void *s_cmd_ctx;
 static int64_t s_last_dispatch_seq;
 static char s_last_dispatch_mode[16];
+static volatile int s_send_block_count;
+static volatile int s_ws_teardown_count;
 
 static void parse_string_field(cJSON *item, char *out, size_t out_len)
 {
@@ -112,7 +114,7 @@ static bool build_ws_uri(void)
 
 static esp_err_t ws_send_json(const char *json)
 {
-    if (s_ws == NULL || !s_connected || json == NULL) {
+    if (s_send_block_count > 0 || s_ws == NULL || !s_connected || json == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     int n = esp_websocket_client_send_text(s_ws, json, (int)strlen(json), pdMS_TO_TICKS(3000));
@@ -224,13 +226,20 @@ static void handle_device_record(cJSON *record)
 
     merge_sync_fields(&cmd);
 
+    cJSON *ack = cJSON_GetObjectItem(record, "ack_seq");
+    if (cJSON_IsNumber(ack)) {
+        cmd.ack_seq = (int64_t)ack->valuedouble;
+    }
+
     bool pending = cmd.command_seq > app_cloud_last_command_seq();
     bool new_command = pending && strcmp(cmd.desired_mode, "idle") != 0;
-    bool cancel_command = pending && strcmp(cmd.desired_mode, "idle") == 0;
+    bool server_done = pending && strcmp(cmd.desired_mode, "idle") == 0 &&
+                       cmd.ack_seq >= cmd.command_seq;
+    bool user_cancel = pending && strcmp(cmd.desired_mode, "idle") == 0 && !server_done;
     bool duplicate = cmd.command_seq == s_last_dispatch_seq &&
                      strcmp(cmd.desired_mode, s_last_dispatch_mode) == 0;
 
-    if (!new_command && !cancel_command) {
+    if (!new_command && !server_done && !user_cancel) {
         return;
     }
     if (duplicate) {
@@ -383,6 +392,12 @@ static void realtime_worker_task(void *arg)
 
         build_channel_topic();
 
+        if (s_ws_teardown_count > 0) {
+            ws_stop();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
         if (!token_valid()) {
             ws_stop();
             if (refresh_access_token() != ESP_OK) {
@@ -455,4 +470,25 @@ void app_realtime_refresh(void)
     s_last_dispatch_seq = 0;
     s_last_dispatch_mode[0] = '\0';
     ws_stop();
+}
+
+void app_realtime_suspend_for_http(bool tear_down_ws)
+{
+    s_send_block_count++;
+    if (tear_down_ws) {
+        s_ws_teardown_count++;
+        if (s_ws_teardown_count == 1) {
+            ws_stop();
+        }
+    }
+}
+
+void app_realtime_resume_after_http(void)
+{
+    if (s_send_block_count > 0) {
+        s_send_block_count--;
+    }
+    if (s_ws_teardown_count > 0) {
+        s_ws_teardown_count--;
+    }
 }

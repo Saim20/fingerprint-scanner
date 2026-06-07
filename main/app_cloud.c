@@ -192,6 +192,8 @@ static void build_token_url(char *out, size_t out_len)
 }
 
 static esp_err_t http_post_json(const char *url, const char *body, char *resp, size_t resp_len);
+static esp_err_t http_post_json_ex(const char *url, const char *body, char *resp, size_t resp_len,
+                                   bool tear_down_ws);
 
 const char *app_cloud_base_url(void)
 {
@@ -321,20 +323,29 @@ static esp_err_t http_post_json_once(const char *url, const char *body, char *re
     return ESP_OK;
 }
 
-static esp_err_t http_post_json(const char *url, const char *body, char *resp, size_t resp_len)
+static esp_err_t http_post_json_ex(const char *url, const char *body, char *resp, size_t resp_len,
+                                   bool tear_down_ws)
 {
     esp_err_t err = ESP_FAIL;
     for (int attempt = 0; attempt < HTTP_RETRIES; attempt++) {
+        bool teardown = tear_down_ws || attempt > 0;
         if (attempt > 0) {
             ESP_LOGW(CLOUD_TAG, "HTTP retry %d/%d", attempt + 1, HTTP_RETRIES);
-            vTaskDelay(pdMS_TO_TICKS(300 * (uint32_t)attempt));
+            vTaskDelay(pdMS_TO_TICKS(800 * (uint32_t)attempt));
         }
+        app_realtime_suspend_for_http(teardown);
         err = http_post_json_once(url, body, resp, resp_len);
+        app_realtime_resume_after_http();
         if (err == ESP_OK) {
             return ESP_OK;
         }
     }
     return err;
+}
+
+static esp_err_t http_post_json(const char *url, const char *body, char *resp, size_t resp_len)
+{
+    return http_post_json_ex(url, body, resp, resp_len, false);
 }
 
 static void cloud_cache_mappings(const app_cloud_sync_t *sync)
@@ -551,7 +562,8 @@ static esp_err_t do_sync(app_cloud_sync_t *out)
 static esp_err_t post_event(const char *body)
 {
     build_function_url(s_sync_url, sizeof(s_sync_url), "event");
-    return http_post_json(s_sync_url, body, NULL, 0);
+    /* Keep WSS up — only tear down on HTTP retry if TLS collides. */
+    return http_post_json_ex(s_sync_url, body, NULL, 0, false);
 }
 
 static esp_err_t cloud_post_scan(uint16_t fp_slot)
@@ -686,12 +698,16 @@ static void cloud_worker_task(void *arg)
                 s_sync_cb(sync, s_sync_ctx);
             }
             if (s_cmd_cb != NULL) {
-                if (sync->command_seq > s_last_command_seq) {
+                bool cmd_pending = sync->command_seq > s_last_command_seq;
+                bool idle_push = strcmp(sync->desired_mode, "idle") == 0 && cmd_pending;
+                if (cmd_pending && strcmp(sync->desired_mode, "idle") != 0) {
                     ESP_LOGI(CLOUD_TAG, "command seq=%lld mode=%s slot=%u",
                              (long long)sync->command_seq, sync->desired_mode,
                              (unsigned)sync->desired_fp_slot);
                 }
-                s_cmd_cb(sync, s_cmd_ctx);
+                if (cmd_pending || idle_push) {
+                    s_cmd_cb(sync, s_cmd_ctx);
+                }
             }
         } else {
             logged_online = false;

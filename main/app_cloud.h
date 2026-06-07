@@ -64,7 +64,7 @@ esp_err_t app_cloud_report_slot_cleared(uint16_t fp_slot);
 esp_err_t app_cloud_report_all_cleared(void);
 esp_err_t app_cloud_request_sync(void);
 esp_err_t app_cloud_ack(int64_t command_seq);
-/** Immediate ack (bypasses queue) — for idle/cancel. */
+/** Sync HTTP ack — cloud task stack only; do not call from ui_worker. */
 esp_err_t app_cloud_ack_now(int64_t command_seq);
 int64_t app_cloud_last_command_seq(void);
 

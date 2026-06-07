@@ -518,9 +518,13 @@ static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx)
 
     if (strcmp(cmd->desired_mode, "idle") == 0) {
         if (app_cloud_has_pending(cmd)) {
-            app_cloud_ack_now(cmd->command_seq);
-            msg_user("[CLOUD] Command cancelled (seq %lld)\n", (long long)cmd->command_seq);
-            app_buzzer_beep_cancel();
+            app_cloud_ack(cmd->command_seq);
+            if (cmd->ack_seq >= cmd->command_seq) {
+                msg_user("[CLOUD] Command complete (seq %lld)\n", (long long)cmd->command_seq);
+            } else {
+                msg_user("[CLOUD] Command cancelled (seq %lld)\n", (long long)cmd->command_seq);
+                app_buzzer_beep_cancel();
+            }
         }
         s_last_notify_cmd_seq = 0;
         memset(&s_pending_cmd, 0, sizeof(s_pending_cmd));
@@ -549,14 +553,12 @@ static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx)
         return;
     }
 
-    if (app_cloud_has_pending(cmd)) {
-        if (cloud_command_needs_go(cmd)) {
+    if (app_cloud_has_pending(cmd) && cloud_command_needs_go(cmd)) {
+        if (cmd->command_seq != s_last_notify_cmd_seq) {
             ESP_LOGI(TAG, "cloud: pending %s seq=%lld — press GO",
                      cmd->desired_mode, (long long)cmd->command_seq);
-            if (cmd->command_seq != s_last_notify_cmd_seq) {
-                s_last_notify_cmd_seq = cmd->command_seq;
-                app_buzzer_beep_notify();
-            }
+            s_last_notify_cmd_seq = cmd->command_seq;
+            app_buzzer_beep_notify();
         }
     }
 }
@@ -924,7 +926,8 @@ void app_main(void)
         msg_user("[CLOUD] not configured — use menuconfig or: provision / cloudurl\n");
     }
 
-    xTaskCreate(ui_worker_task, "ui_worker", 3072, NULL, 5, NULL);
+    /* Enroll + UART depth; never run TLS/HTTP here (cloud task only). */
+    xTaskCreate(ui_worker_task, "ui_worker", 8192, NULL, 5, NULL);
     xTaskCreate(startup_task, "startup", 3072, NULL, 5, NULL);
     xTaskCreate(serial_cmd_task, "serial_cmd", 3072, NULL, 4, NULL);
     xTaskCreate(attendance_task, "attendance", 3072, NULL, 3, NULL);
