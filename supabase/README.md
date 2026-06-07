@@ -71,6 +71,16 @@ After the initial schema, apply template-sync migration (`20250519100000_templat
 
 ## Deploy edge functions (ESP32)
 
+**Before deploy — JWT secret for Realtime (required for `device-token`):**
+
+Dashboard → **Project Settings** → **API** → **JWT Settings** → copy **JWT Secret**, then:
+
+```bash
+supabase secrets set JWT_SECRET='paste-your-jwt-secret-here'
+```
+
+Without this, the ESP32 logs `HTTP 500 body={"error":"JWT secret not configured"}` and Realtime never connects (HTTP sync still works).
+
 ```bash
 supabase functions deploy device-api
 supabase functions deploy device-token

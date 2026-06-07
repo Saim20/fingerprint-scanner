@@ -16,19 +16,12 @@
 
 #include "app_buzzer.h"
 #include "app_buttons.h"
-#include "app_fp_bare.h"
 #include "app_fingerprint.h"
-#include "app_oled.h"
 #include "app_realtime.h"
 #include "app_wifi.h"
 #include "app_cloud.h"
 
 static const char *TAG = "attendance";
-
-typedef enum {
-    ACT_RUN_PENDING,
-    ACT_BARE_ENROLL,
-} action_t;
 
 static bool s_fp_ok;
 static bool s_busy;
@@ -42,7 +35,6 @@ static int64_t s_last_auto_attempt_tick;
 static int64_t s_last_notify_cmd_seq;
 static int64_t s_last_attendance_feedback_ms;
 
-static void show_status_screen(void);
 static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx);
 
 static bool cloud_command_needs_go(const app_cloud_sync_t *cmd)
@@ -53,17 +45,50 @@ static bool cloud_command_needs_go(const app_cloud_sync_t *cmd)
     return strcmp(cmd->desired_mode, "add") == 0 || strcmp(cmd->desired_mode, "scan") == 0;
 }
 
-#define ATTENDANCE_FEEDBACK_COOLDOWN_MS 2800
+/** Yield between background scan attempts (no finger = fast poll). */
+#define ATTENDANCE_SCAN_PAUSE_MS    100
+/** Minimum gap between attendance buzzer / cloud feedback. */
+#define ATTENDANCE_MIN_GAP_MS       800
+/** Suppress repeat feedback for same slot while finger rests on sensor. */
+#define ATTENDANCE_SAME_SLOT_MS     2000
 
-static bool attendance_feedback_cooldown(void)
+static uint16_t s_last_match_slot;
+static int64_t s_last_match_slot_ms;
+
+static int64_t attendance_now_ms(void)
 {
-    int64_t now = (int64_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-    return (now - s_last_attendance_feedback_ms) < ATTENDANCE_FEEDBACK_COOLDOWN_MS;
+    return (int64_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
-static void mark_attendance_feedback(void)
+static bool attendance_gap_elapsed(int64_t since_ms, int64_t gap_ms)
 {
-    s_last_attendance_feedback_ms = (int64_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    return (attendance_now_ms() - since_ms) >= gap_ms;
+}
+
+static bool attendance_accept_match(uint16_t user_id)
+{
+    int64_t now = attendance_now_ms();
+    if (!attendance_gap_elapsed(s_last_attendance_feedback_ms, ATTENDANCE_MIN_GAP_MS)) {
+        return false;
+    }
+    if (user_id == s_last_match_slot &&
+        !attendance_gap_elapsed(s_last_match_slot_ms, ATTENDANCE_SAME_SLOT_MS)) {
+        return false;
+    }
+    s_last_attendance_feedback_ms = now;
+    s_last_match_slot = user_id;
+    s_last_match_slot_ms = now;
+    return true;
+}
+
+static bool attendance_accept_no_match(void)
+{
+    int64_t now = attendance_now_ms();
+    if (!attendance_gap_elapsed(s_last_attendance_feedback_ms, ATTENDANCE_MIN_GAP_MS)) {
+        return false;
+    }
+    s_last_attendance_feedback_ms = now;
+    return true;
 }
 
 static bool attendance_paused(void)
@@ -91,8 +116,8 @@ static void try_post_pending(void)
     if (s_busy || s_action_pending || s_action_q == NULL) {
         return;
     }
-    action_t act = ACT_RUN_PENDING;
-    if (xQueueSend(s_action_q, &act, 0) != pdTRUE) {
+    uint8_t trigger = 1;
+    if (xQueueSend(s_action_q, &trigger, 0) != pdTRUE) {
         return;
     }
     s_action_pending = true;
@@ -116,62 +141,6 @@ static void msg_enroll_err(int step, esp_err_t err)
                  app_fp_last_ack());
     } else {
         msg_user("  -> step %d: %s\n", step, esp_err_to_name(err));
-    }
-}
-
-static const char *cloud_status_line(void)
-{
-    if (!app_cloud_is_configured()) {
-        return "Cloud: setup";
-    }
-    if (!app_wifi_is_connected()) {
-        return "WiFi: waiting";
-    }
-    return "Cloud OK";
-}
-
-static void show_pending_screen(void)
-{
-    const char *mode = s_pending_cmd.desired_mode;
-    const char *who = s_pending_cmd.person_display_name[0] ? s_pending_cmd.person_display_name
-                                                           : s_pending_cmd.desired_person_id;
-    char line3[24];
-
-    if (strcmp(mode, "add") == 0) {
-        snprintf(line3, sizeof(line3), "next slot %u", (unsigned)s_next_enroll_id);
-        app_oled_show_lines("Press GO", "Enroll", who[0] ? who : "person", line3);
-    } else if (strcmp(mode, "scan") == 0) {
-        app_oled_show_lines("Press GO", "Test scan", "", "");
-    } else if (strcmp(mode, "delete") == 0) {
-        snprintf(line3, sizeof(line3), "slot %u", (unsigned)s_pending_cmd.desired_fp_slot);
-        app_oled_show_lines("Cloud", "Deleting", line3, "");
-    } else if (strcmp(mode, "clear") == 0) {
-        app_oled_show_lines("Cloud", "Clear all", "", "");
-    } else {
-        show_status_screen();
-    }
-}
-
-static void show_status_screen(void)
-{
-    uint8_t count = 0;
-    char count_line[24];
-
-    if (s_fp_ok && app_fp_get_user_count(&count) == ESP_OK) {
-        snprintf(count_line, sizeof(count_line), "Users: %u", (unsigned)count);
-    } else {
-        snprintf(count_line, sizeof(count_line), "FP: not ready");
-    }
-
-    if (app_cloud_has_pending(&s_pending_cmd)) {
-        show_pending_screen();
-        return;
-    }
-
-    if (app_cloud_background_scan_enabled()) {
-        app_oled_show_lines("Attendance", "Scan finger", count_line, cloud_status_line());
-    } else {
-        app_oled_show_lines("Command mode", "Use dashboard", count_line, cloud_status_line());
     }
 }
 
@@ -209,7 +178,6 @@ static bool run_enroll(uint16_t slot_id)
     for (int step = 1; step <= APP_FP_ENROLL_STEPS && err == ESP_OK; step++) {
         msg_user("[ENROLL] Step %d/%d — press flat, HOLD 3-5 sec\n", step, APP_FP_ENROLL_STEPS);
         msg_user("           Lift between steps; up to %d tries\n", APP_FP_ENROLL_MAX_TRIES);
-        app_oled_show_lines("ENROLL", "Hold finger", "", "");
         err = app_fp_enroll_step(slot_id, step);
         if (err == ESP_OK) {
             msg_user("[ENROLL] Step %d/%d OK\n", step, APP_FP_ENROLL_STEPS);
@@ -231,7 +199,6 @@ static bool run_enroll(uint16_t slot_id)
             msg_user("\n");
         }
         (void)app_fp_clear_slot(slot_id);
-        app_oled_show_lines("ENROLL", "Failed", "", "");
         return false;
     }
 
@@ -247,7 +214,6 @@ static bool run_enroll(uint16_t slot_id)
     if (s_next_enroll_id == slot_id && s_next_enroll_id < APP_FP_MAX_USER_ID) {
         s_next_enroll_id++;
     }
-    app_oled_show_lines("ENROLL", "Success", "", "");
     app_buzzer_beep_done();
     app_cloud_request_sync();
     return true;
@@ -255,6 +221,8 @@ static bool run_enroll(uint16_t slot_id)
 
 static void handle_match(uint16_t user_id)
 {
+    app_buzzer_beep_attendance_ok();
+
     const char *label = app_cloud_is_configured() ? app_cloud_slot_label(user_id) : NULL;
     if (label != NULL && label[0] != '\0') {
         msg_user("[SCAN] MATCH — %s (slot %u)\n", label, (unsigned)user_id);
@@ -269,25 +237,12 @@ static void handle_match(uint16_t user_id)
             app_buzzer_beep_busy();
         }
     }
-    char line2[24];
-    snprintf(line2, sizeof(line2), "slot %u", (unsigned)user_id);
-    app_oled_show_lines("MATCH", label ? label : "OK", line2, "");
-    app_buzzer_beep_attendance_ok();
-    mark_attendance_feedback();
-    vTaskDelay(pdMS_TO_TICKS(900));
-    show_status_screen();
 }
 
 static void handle_no_match(void)
 {
-    msg_user("[SCAN] No match\n");
     app_buzzer_beep_attendance_unknown();
-    mark_attendance_feedback();
-    app_oled_show_lines("NO MATCH", "Unknown", "finger", "");
-    vTaskDelay(pdMS_TO_TICKS(700));
-    if (!s_busy) {
-        show_status_screen();
-    }
+    msg_user("[SCAN] No match\n");
 }
 
 static void run_scan_once(void)
@@ -310,7 +265,6 @@ static void run_scan_once(void)
 
     app_buzzer_beep_start();
     msg_user("[SCAN] %u template(s) — put finger on sensor NOW, hold 3-5 sec\n", (unsigned)count);
-    app_oled_show_lines("SCAN", "Place finger", "", "");
     app_buzzer_beep_prompt();
     vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -403,13 +357,14 @@ static bool run_clear_all(void)
     return false;
 }
 
-static void post_action(action_t act)
+static void post_pending_command(void)
 {
     if (s_action_q == NULL || s_action_pending) {
         return;
     }
-    if (xQueueSend(s_action_q, &act, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "action queue busy");
+    uint8_t trigger = 1;
+    if (xQueueSend(s_action_q, &trigger, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "command queue busy");
         app_buzzer_beep_busy();
         return;
     }
@@ -471,9 +426,6 @@ static void on_cloud_settings(void *ctx)
     if (s_startup_done && !app_cloud_background_scan_enabled()) {
         app_buzzer_beep_command_mode();
     }
-    if (!s_busy) {
-        show_status_screen();
-    }
 }
 
 static void on_cloud_sync(const app_cloud_sync_t *sync, void *ctx)
@@ -512,7 +464,8 @@ static void on_cloud_sync(const app_cloud_sync_t *sync, void *ctx)
             memcpy(last.stale, sync->stale_slots, sizeof(last.stale));
             ESP_LOGI(TAG, "cloud: template drift — %u unmapped, %u stale (map in web UI)",
                      (unsigned)sync->unmapped_count, (unsigned)sync->stale_count);
-            if (s_startup_done && !attendance_feedback_cooldown()) {
+            if (s_startup_done &&
+                attendance_gap_elapsed(s_last_attendance_feedback_ms, ATTENDANCE_MIN_GAP_MS)) {
                 app_buzzer_beep_warn();
             }
         }
@@ -531,10 +484,6 @@ static void on_cloud_sync(const app_cloud_sync_t *sync, void *ctx)
         if (s_pending_cmd.desired_fp_slot == 0 && sync->desired_fp_slot > 0) {
             s_pending_cmd.desired_fp_slot = sync->desired_fp_slot;
         }
-    }
-
-    if (!s_busy) {
-        show_status_screen();
     }
 }
 
@@ -575,9 +524,6 @@ static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx)
         }
         s_last_notify_cmd_seq = 0;
         memset(&s_pending_cmd, 0, sizeof(s_pending_cmd));
-        if (!s_busy) {
-            show_status_screen();
-        }
         return;
     }
 
@@ -612,11 +558,6 @@ static void on_cloud_command(const app_cloud_sync_t *cmd, void *ctx)
                 app_buzzer_beep_notify();
             }
         }
-        if (!s_busy) {
-            show_pending_screen();
-        }
-    } else if (!s_busy) {
-        show_status_screen();
     }
 }
 
@@ -631,9 +572,6 @@ static void on_go_button(void *ctx)
     if (!app_cloud_has_pending(&s_pending_cmd)) {
         msg_user("[BTN] No pending command — use web dashboard\n");
         app_buzzer_beep_deny();
-        app_oled_show_lines("No command", "Use dashboard", "", "");
-        vTaskDelay(pdMS_TO_TICKS(1200));
-        show_status_screen();
         return;
     }
     if (!cloud_command_needs_go(&s_pending_cmd)) {
@@ -642,47 +580,25 @@ static void on_go_button(void *ctx)
         return;
     }
     app_buzzer_beep_go();
-    post_action(ACT_RUN_PENDING);
-}
-
-static void on_bare_enroll_button(void *ctx)
-{
-    (void)ctx;
-    if (!s_fp_ok) {
-        msg_user("[BTN] Fingerprint module not ready\n");
-        app_buzzer_beep_error();
-        return;
-    }
-    if (s_busy) {
-        ESP_LOGW(TAG, "busy — ignore ENROLL");
-        app_buzzer_beep_busy();
-        return;
-    }
-    app_buzzer_beep_go();
-    post_action(ACT_BARE_ENROLL);
+    post_pending_command();
 }
 
 static void ui_worker_task(void *arg)
 {
     (void)arg;
-    action_t act;
+    uint8_t trigger;
 
     for (;;) {
-        if (xQueueReceive(s_action_q, &act, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_action_q, &trigger, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
         s_busy = true;
         app_cloud_set_busy(true);
-        if (act == ACT_RUN_PENDING) {
-            run_pending_cloud_command();
-        } else if (act == ACT_BARE_ENROLL) {
-            app_fp_bare_enroll(APP_FP_BARE_SLOT);
-        }
+        run_pending_cloud_command();
         s_busy = false;
         app_cloud_set_busy(false);
         s_action_pending = false;
-        show_status_screen();
     }
 }
 
@@ -714,10 +630,8 @@ static void startup_task(void *arg)
         sync_template_count();
     }
 
-    msg_user("\n[READY] Cloud-controlled scanner\n");
+    msg_user("\n[READY] Cloud-controlled scanner (buzzer feedback)\n");
     msg_user("  GPIO0 = run pending command from dashboard\n");
-    msg_user("  GPIO1 = BARE enroll test (slot %u, 3 scans, no cloud)\n",
-             (unsigned)APP_FP_BARE_SLOT);
     msg_user("  Passive scan: enable in web dashboard\n");
     if (count > 0) {
         msg_user("  %u template(s) on device\n", (unsigned)count);
@@ -733,13 +647,6 @@ static void startup_task(void *arg)
         msg_user("[WiFi] not connected yet (check menuconfig SSID/password)\n");
     }
 
-    if (app_oled_is_ready()) {
-        msg_user("[OLED] display OK\n");
-    } else {
-        msg_user("[OLED] not detected — type: oled  (scan I2C pins)\n");
-    }
-
-    show_status_screen();
     app_buzzer_beep_ready();
     s_startup_done = true;
     vTaskDelete(NULL);
@@ -753,13 +660,13 @@ static void print_help(void)
     msg_user("  slots          - list occupied slots (NVS registry)\n");
     msg_user("  slots rebuild  - probe module and refresh slot registry\n");
     msg_user("  buttons        - show GO button GPIO level\n");
-    msg_user("  oled           - scan I2C for OLED (debug wiring)\n");
     msg_user("  provision KEY  - save Supabase device API key (NVS)\n");
     msg_user("  provision clear - remove NVS key (use menuconfig key)\n");
     msg_user("  deviceid UUID  - save device UUID for Realtime (from web dashboard)\n");
     msg_user("  cloudurl URL   - set Supabase base URL (NVS)\n");
-    msg_user("\nGPIO0 = GO (cloud command)   GPIO1 = bare enroll slot %u\n\n",
-             (unsigned)APP_FP_BARE_SLOT);
+    msg_user("  wifi           - show link status + last disconnect reason\n");
+    msg_user("  wifireset      - clear cached Wi-Fi NVS and reconnect\n");
+    msg_user("\nGPIO0 = GO (cloud command)\n\n");
 }
 
 static void handle_serial_line(char *line)
@@ -794,7 +701,7 @@ static void handle_serial_line(char *line)
                 msg_user("fingerprint module not ready\n");
                 return;
             }
-            msg_user("[SLOTS] Probing module (may take ~30s)…\n");
+            msg_user("[SLOTS] Reconciling registry with module count…\n");
             s_busy = true;
             app_cloud_set_busy(true);
             if (app_fp_slots_rebuild_registry() == ESP_OK) {
@@ -814,8 +721,6 @@ static void handle_serial_line(char *line)
             msg_user(" %u", (unsigned)list[i]);
         }
         msg_user("\n");
-    } else if (strcmp(cmd, "oled") == 0) {
-        app_oled_diag();
     } else if (strcmp(cmd, "provision") == 0) {
         char *arg = strtok(NULL, " \t\r\n");
         if (arg == NULL) {
@@ -866,6 +771,18 @@ static void handle_serial_line(char *line)
         }
         esp_err_t err = app_cloud_set_url(arg);
         msg_user(err == ESP_OK ? "[CLOUD] URL saved\n" : "[CLOUD] URL save failed: %s\n",
+                 esp_err_to_name(err));
+    } else if (strcmp(cmd, "wifi") == 0) {
+        app_wifi_print_status();
+    } else if (strcmp(cmd, "wifireset") == 0) {
+        esp_err_t err = app_wifi_clear_stored_config();
+        if (err != ESP_OK) {
+            msg_user("[WiFi] clear failed: %s\n", esp_err_to_name(err));
+            return;
+        }
+        err = app_wifi_reconnect();
+        msg_user(err == ESP_OK ? "[WiFi] NVS cleared — reconnecting\n"
+                               : "[WiFi] reconnect failed: %s\n",
                  esp_err_to_name(err));
     } else {
         msg_user("unknown: %s (try help)\n", cmd);
@@ -921,41 +838,31 @@ static void serial_cmd_task(void *arg)
 static void attendance_task(void *arg)
 {
     (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     while (true) {
-        if (s_fp_ok && !attendance_paused()) {
-            uint8_t count = 0;
-            if (app_fp_get_user_count(&count) != ESP_OK || count == 0) {
-                vTaskDelay(pdMS_TO_TICKS(500));
-                continue;
-            }
+        if (s_fp_ok && !attendance_paused() && app_fp_stored_count() > 0) {
             uint16_t user_id = 0;
             bool matched = false;
-            if (attendance_feedback_cooldown()) {
-                vTaskDelay(pdMS_TO_TICKS(400));
-                continue;
-            }
 
             esp_err_t err = app_fp_search_attendance(&user_id, &matched);
-            if (err == ESP_OK && matched) {
+            if (err == ESP_OK && matched && attendance_accept_match(user_id)) {
                 s_busy = true;
                 app_cloud_set_busy(true);
                 handle_match(user_id);
                 app_cloud_set_busy(false);
                 s_busy = false;
-            } else if (err == ESP_OK && app_fp_last_search_had_finger()) {
+            } else if (err == ESP_OK && app_fp_last_search_had_finger() &&
+                       attendance_accept_no_match()) {
                 s_busy = true;
                 app_cloud_set_busy(true);
                 handle_no_match();
                 app_cloud_set_busy(false);
                 s_busy = false;
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(400));
             }
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(400));
         }
+
+        vTaskDelay(pdMS_TO_TICKS(ATTENDANCE_SCAN_PAUSE_MS));
     }
 }
 
@@ -973,16 +880,10 @@ void app_main(void)
 
     memset(&s_pending_cmd, 0, sizeof(s_pending_cmd));
 
-    s_action_q = xQueueCreate(1, sizeof(action_t));
+    s_action_q = xQueueCreate(1, sizeof(uint8_t));
     if (s_action_q == NULL) {
         ESP_LOGE(TAG, "action queue create failed");
         return;
-    }
-
-    esp_err_t oled_err = app_oled_init();
-    if (oled_err != ESP_OK) {
-        msg_user("[BOOT] External OLED not detected (%s)\n", esp_err_to_name(oled_err));
-        msg_user("  SDA=GPIO5 SCL=GPIO6 VCC=3V3 GND=GND (+ 4.7k pull-ups if needed)\n");
     }
 
     if (app_wifi_init() != ESP_OK) {
@@ -1003,7 +904,7 @@ void app_main(void)
         msg_user("[BOOT] Fingerprint module FAILED — check UART wiring\n");
     }
 
-    app_buttons_init(on_go_button, on_bare_enroll_button, NULL);
+    app_buttons_init(on_go_button, NULL);
 
     app_cloud_init();
     if (app_cloud_is_configured()) {
@@ -1023,8 +924,8 @@ void app_main(void)
         msg_user("[CLOUD] not configured — use menuconfig or: provision / cloudurl\n");
     }
 
-    xTaskCreate(ui_worker_task, "ui_worker", 4096, NULL, 5, NULL);
-    xTaskCreate(startup_task, "startup", 4096, NULL, 5, NULL);
-    xTaskCreate(serial_cmd_task, "serial_cmd", 4096, NULL, 4, NULL);
-    xTaskCreate(attendance_task, "attendance", 4096, NULL, 3, NULL);
+    xTaskCreate(ui_worker_task, "ui_worker", 3072, NULL, 5, NULL);
+    xTaskCreate(startup_task, "startup", 3072, NULL, 5, NULL);
+    xTaskCreate(serial_cmd_task, "serial_cmd", 3072, NULL, 4, NULL);
+    xTaskCreate(attendance_task, "attendance", 3072, NULL, 3, NULL);
 }

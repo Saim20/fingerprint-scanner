@@ -1,7 +1,7 @@
 # Working fingerprint baseline (commit `318495d`)
 
 Reference captured while HEAD is detached at the **working** tree (local enroll/scan, no cloud).
-When merging into `main`, **preserve enroll UART behavior from this baseline**; add cloud/OLED on top without breaking it.
+When merging into `main`, **preserve enroll UART behavior from this baseline**; add cloud features on top without breaking it. (OLED and GPIO1 bare-enroll were removed — buzzer-only feedback now.)
 
 ---
 
@@ -58,8 +58,7 @@ run_enroll(slot_id):
 ## Hardware (unchanged on main)
 
 - UART: **19200**, TX **GPIO4**, RX **GPIO7**, `APP_FP_SWAP_TX_RX=0`
-- OLED: SDA **GPIO5**, SCL **GPIO6** (4.7k pull-ups to 3V3 if no ACK)
-- Buzzer: **GPIO10**
+- Buzzer: **GPIO10** (no display)
 
 ---
 
@@ -70,7 +69,6 @@ Typical `main` extras (re-apply carefully):
 - `app_cloud.c`, `app_realtime.c`, Supabase sync, GO button (GPIO0) for cloud commands
 - NVS slot registry, `app_fp_alloc_enroll_slot`, `app_fp_mark_slot_enrolled`
 - `FP_CMD_SET_TIMEOUT` (0x2E) = **25** at boot — **good** if module was bricked by tout=0; must not send `GET_IMAGE` between enroll steps
-- Optional `app_fp_bare.c` on GPIO1 for debug — must use same 3-step enroll as this baseline
 
 ---
 
@@ -92,7 +90,7 @@ Typical `main` extras (re-apply carefully):
 - [x] Cloud: `app_fp_clear_slot` only if slot marked/occupied; `app_fp_alloc_enroll_slot`; no IDENTIFY success gate.
 - [x] Keep `SET_TIMEOUT 25` at init; no GET_IMAGE between enroll steps; no compare-level init.
 - [x] `attendance_task` / cloud: hold `s_busy` during enroll (UART exclusive).
-- [x] GPIO0=GO (cloud), GPIO1=bare test (`app_fp_bare.c`).
+- [x] GPIO0=GO (cloud command).
 
 ---
 

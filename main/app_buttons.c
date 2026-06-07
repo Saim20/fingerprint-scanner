@@ -23,7 +23,7 @@ typedef struct {
     int cooldown_ms;
 } btn_slot_t;
 
-static btn_slot_t s_btns[2];
+static btn_slot_t s_btn;
 static void *s_ctx;
 
 static bool btn_is_down(gpio_num_t gpio)
@@ -44,39 +44,36 @@ static void btn_fire(btn_slot_t *b)
 static void buttons_task(void *arg)
 {
     (void)arg;
-    const size_t n_btns = sizeof(s_btns) / sizeof(s_btns[0]);
 
     for (;;) {
-        for (size_t i = 0; i < n_btns; i++) {
-            btn_slot_t *b = &s_btns[i];
-            if (b->cooldown_ms > 0) {
-                b->cooldown_ms -= BTN_POLL_MS;
-                if (b->cooldown_ms < 0) {
-                    b->cooldown_ms = 0;
+        btn_slot_t *b = &s_btn;
+        if (b->cooldown_ms > 0) {
+            b->cooldown_ms -= BTN_POLL_MS;
+            if (b->cooldown_ms < 0) {
+                b->cooldown_ms = 0;
+            }
+        }
+
+        bool down = btn_is_down(b->gpio);
+
+        if (down != b->last_down) {
+            b->stable_ms = 0;
+            b->last_down = down;
+        } else if (b->stable_ms < BTN_DEBOUNCE_MS) {
+            b->stable_ms += BTN_POLL_MS;
+        }
+
+        if (b->stable_ms >= BTN_DEBOUNCE_MS) {
+            if (down && !b->pressed) {
+                b->pressed = true;
+                if (b->cooldown_ms == 0) {
+                    ESP_LOGI(BTN_TAG, "%s pressed (GPIO%d)", b->label, (int)b->gpio);
                 }
-            }
-
-            bool down = btn_is_down(b->gpio);
-
-            if (down != b->last_down) {
-                b->stable_ms = 0;
-                b->last_down = down;
-            } else if (b->stable_ms < BTN_DEBOUNCE_MS) {
-                b->stable_ms += BTN_POLL_MS;
-            }
-
-            if (b->stable_ms >= BTN_DEBOUNCE_MS) {
-                if (down && !b->pressed) {
-                    b->pressed = true;
-                    if (b->cooldown_ms == 0) {
-                        ESP_LOGI(BTN_TAG, "%s pressed (GPIO%d)", b->label, (int)b->gpio);
-                    }
-                } else if (!down && b->pressed) {
-                    b->pressed = false;
-                    if (b->cooldown_ms == 0) {
-                        ESP_LOGI(BTN_TAG, "%s released (GPIO%d)", b->label, (int)b->gpio);
-                        btn_fire(b);
-                    }
+            } else if (!down && b->pressed) {
+                b->pressed = false;
+                if (b->cooldown_ms == 0) {
+                    ESP_LOGI(BTN_TAG, "%s released (GPIO%d)", b->label, (int)b->gpio);
+                    btn_fire(b);
                 }
             }
         }
@@ -85,10 +82,10 @@ static void buttons_task(void *arg)
     }
 }
 
-esp_err_t app_buttons_init(app_btn_cb_t go_cb, app_btn_cb_t enroll_cb, void *ctx)
+esp_err_t app_buttons_init(app_btn_cb_t go_cb, void *ctx)
 {
     s_ctx = ctx;
-    s_btns[0] = (btn_slot_t){
+    s_btn = (btn_slot_t){
         .gpio = APP_BTN_PIN_GO,
         .label = "GO",
         .on_release = go_cb,
@@ -97,19 +94,9 @@ esp_err_t app_buttons_init(app_btn_cb_t go_cb, app_btn_cb_t enroll_cb, void *ctx
         .stable_ms = BTN_DEBOUNCE_MS,
         .cooldown_ms = 0,
     };
-    s_btns[1] = (btn_slot_t){
-        .gpio = APP_BTN_PIN_ENROLL,
-        .label = "ENROLL",
-        .on_release = enroll_cb,
-        .pressed = false,
-        .last_down = false,
-        .stable_ms = BTN_DEBOUNCE_MS,
-        .cooldown_ms = 0,
-    };
 
     gpio_config_t io = {
-        .pin_bit_mask = (1ULL << APP_BTN_PIN_GO) | (1ULL << APP_BTN_PIN_ENROLL) |
-                        (1ULL << APP_BTN_PIN_UNUSED_2) | (1ULL << APP_BTN_PIN_UNUSED_3),
+        .pin_bit_mask = (1ULL << APP_BTN_PIN_GO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -122,15 +109,12 @@ esp_err_t app_buttons_init(app_btn_cb_t go_cb, app_btn_cb_t enroll_cb, void *ctx
     }
 
     vTaskDelay(pdMS_TO_TICKS(20));
-    for (size_t i = 0; i < sizeof(s_btns) / sizeof(s_btns[0]); i++) {
-        s_btns[i].last_down = btn_is_down(s_btns[i].gpio);
-        s_btns[i].pressed = s_btns[i].last_down;
-    }
+    s_btn.last_down = btn_is_down(s_btn.gpio);
+    s_btn.pressed = s_btn.last_down;
 
-    ESP_LOGI(BTN_TAG, "GPIO%d=GO (cloud cmd)  GPIO%d=ENROLL (bare test)",
-             APP_BTN_PIN_GO, APP_BTN_PIN_ENROLL);
+    ESP_LOGI(BTN_TAG, "GPIO%d=GO (cloud command)", APP_BTN_PIN_GO);
 
-    BaseType_t ok = xTaskCreate(buttons_task, "buttons", 2560, NULL, 6, NULL);
+    BaseType_t ok = xTaskCreate(buttons_task, "buttons", 2048, NULL, 6, NULL);
     if (ok != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
@@ -140,7 +124,6 @@ esp_err_t app_buttons_init(app_btn_cb_t go_cb, app_btn_cb_t enroll_cb, void *ctx
 void app_buttons_print_levels(void)
 {
     printf("Button GPIO (1=released 0=pressed):\n");
-    printf("  GO     GPIO%d = %d\n", APP_BTN_PIN_GO, gpio_get_level(APP_BTN_PIN_GO));
-    printf("  ENROLL GPIO%d = %d\n", APP_BTN_PIN_ENROLL, gpio_get_level(APP_BTN_PIN_ENROLL));
+    printf("  GO GPIO%d = %d\n", APP_BTN_PIN_GO, gpio_get_level(APP_BTN_PIN_GO));
     fflush(stdout);
 }

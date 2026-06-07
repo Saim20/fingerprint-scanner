@@ -66,7 +66,7 @@ uint32_t app_fp_slots_hash(void);
 
 bool app_fp_slot_is_marked(uint16_t slot_id);
 
-/** Probe module (ENROLL1 ack 0x06 = slot used); does not use NVS bitmap. */
+/** IDENTIFY probe — unreliable on FPC1020A; prefer NVS bitmap + module count. */
 bool app_fp_slot_occupied(uint16_t slot_id);
 
 /** Delete template in slot if present; OK if slot was already empty. */
@@ -75,5 +75,13 @@ esp_err_t app_fp_clear_slot(uint16_t slot_id);
 /** Mark slot occupied in NVS after module confirms template stored. */
 esp_err_t app_fp_mark_slot_enrolled(uint16_t slot_id);
 
-/** Probe module for occupied slots; updates NVS bitmap (slow; boot/manual only). */
+/**
+ * Reconcile NVS slot bitmap with module template count.
+ * Uses cloud mapping hints when provided; otherwise fills lowest slots 1..N.
+ * Does not use IDENTIFY (unreliable on FPC1020A).
+ */
+esp_err_t app_fp_slots_reconcile_with_hints(uint8_t module_count, const uint16_t *hints,
+                                            size_t hint_count);
+
+/** Boot / manual reconcile — module count only, sequential slot fill. */
 esp_err_t app_fp_slots_rebuild_registry(void);

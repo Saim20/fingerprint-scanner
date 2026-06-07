@@ -147,23 +147,47 @@ async function handleSync(
       ? body.slots_hash
       : slotsHash(fp_slots);
 
+  const safe_fp_count =
+    Number.isFinite(fp_count) && fp_count >= 0 && fp_count <= 150
+      ? fp_count
+      : fp_slots.length;
+
   const deviceUpdate: Record<string, unknown> = {
     last_seen_at: new Date().toISOString(),
     last_template_sync_at: new Date().toISOString(),
-    reported_slots_hash: slots_hash,
-    reported_fp_slots: fp_slots,
-    reported_fp_count: Number.isFinite(fp_count) && fp_count >= 0 && fp_count <= 150
-      ? fp_count
-      : fp_slots.length,
+    reported_fp_count: safe_fp_count,
   };
+
+  if (fp_slots.length > 0) {
+    deviceUpdate.reported_slots_hash = slots_hash;
+    deviceUpdate.reported_fp_slots = fp_slots;
+  } else if (safe_fp_count === 0) {
+    deviceUpdate.reported_slots_hash = "";
+    deviceUpdate.reported_fp_slots = [];
+  }
+  /* When fp_count > 0 but slot list is empty (registry drift), keep prior
+     reported_fp_slots so the dashboard does not show false stale mappings. */
 
   await supabase.from("devices").update(deviceUpdate).eq("id", device.id);
 
   const mappings = await loadDeviceMappings(supabase, device.id);
-  const { unmapped_slots, stale_slots } =
+  const { data: devRow } = await supabase
+    .from("devices")
+    .select("reported_fp_slots")
+    .eq("id", device.id)
+    .maybeSingle();
+
+  const effectiveSlots =
     fp_slots.length > 0
-      ? reconcileSlots(fp_slots, mappings)
-      : { unmapped_slots: [] as number[], stale_slots: [] as number[] };
+      ? fp_slots
+      : ((devRow?.reported_fp_slots as number[] | null) ?? []);
+
+  const { unmapped_slots, stale_slots } =
+    effectiveSlots.length > 0 && safe_fp_count > 0
+      ? reconcileSlots(effectiveSlots, mappings)
+      : safe_fp_count === 0
+        ? reconcileSlots([], mappings)
+        : { unmapped_slots: [] as number[], stale_slots: [] as number[] };
 
   let person_display_name: string | null = null;
   let person_external_id: string | null = null;

@@ -36,7 +36,7 @@
 
 static char s_http_resp[HTTP_BUF_SIZE];
 static char s_sync_url[256];
-static char s_sync_req[1024];
+static char s_sync_req[2048];
 static app_cloud_sync_t s_sync;
 
 static char s_api_key[128];
@@ -470,9 +470,19 @@ static int build_sync_body(char *body, size_t body_len)
     }
 
     if (n != fp_count) {
-        ESP_LOGW(CLOUD_TAG, "slot registry %u vs module %u — rebuilding before sync",
+        ESP_LOGW(CLOUD_TAG, "slot registry %u vs module %u — reconciling before sync",
                  (unsigned)n, (unsigned)fp_count);
-        if (app_fp_slots_rebuild_registry() == ESP_OK) {
+
+        uint16_t hints[APP_CLOUD_MAX_MAPPINGS];
+        size_t hint_count = 0;
+        if (s_sync.valid) {
+            for (uint8_t i = 0; i < s_sync.mapping_count && hint_count < APP_CLOUD_MAX_MAPPINGS;
+                 i++) {
+                hints[hint_count++] = s_sync.mappings[i].fp_slot;
+            }
+        }
+
+        if (app_fp_slots_reconcile_with_hints(fp_count, hints, hint_count) == ESP_OK) {
             n = 0;
             (void)app_fp_slots_list(slots, APP_FP_MAX_SLOTS, &n);
             (void)app_fp_get_user_count(&fp_count);

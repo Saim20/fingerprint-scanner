@@ -3,7 +3,7 @@
 #include "driver/ledc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #define BUZZ_TAG "app_buzzer"
@@ -14,8 +14,28 @@
 #define BUZZ_FREQ_HZ       2700
 #define BUZZ_DUTY_ON       512
 
+typedef enum {
+    BUZZ_EVT_OK,
+    BUZZ_EVT_DENY,
+    BUZZ_EVT_NOTIFY,
+    BUZZ_EVT_CANCEL,
+    BUZZ_EVT_COMMAND_MODE,
+    BUZZ_EVT_READY,
+    BUZZ_EVT_PROMPT,
+    BUZZ_EVT_ATTENDANCE_OK,
+    BUZZ_EVT_ATTENDANCE_UNKNOWN,
+    BUZZ_EVT_GO,
+    BUZZ_EVT_BUSY,
+    BUZZ_EVT_START,
+    BUZZ_EVT_DONE,
+    BUZZ_EVT_WARN,
+    BUZZ_EVT_ERROR,
+    BUZZ_EVT_WIFI_CONNECTED,
+    BUZZ_EVT_WIFI_DISCONNECTED,
+} buzz_evt_t;
+
 static bool s_ready;
-static SemaphoreHandle_t s_lock;
+static QueueHandle_t s_q;
 
 static void buzzer_stop(void)
 {
@@ -28,7 +48,7 @@ static void buzzer_stop(void)
 
 static void buzzer_tone_ms(uint32_t freq_hz, uint32_t ms)
 {
-    if (!s_ready) {
+    if (!s_ready || ms == 0) {
         return;
     }
     buzzer_stop();
@@ -43,24 +63,117 @@ static void buzzer_tone_ms(uint32_t freq_hz, uint32_t ms)
 
 static void buzzer_gap_ms(uint32_t ms)
 {
-    vTaskDelay(pdMS_TO_TICKS(ms));
+    if (ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(ms));
+    }
 }
 
-static void buzzer_with_lock(void (*play)(void))
+static void buzzer_play(buzz_evt_t evt)
 {
-    if (!s_ready || play == NULL || s_lock == NULL) {
-        return;
+    switch (evt) {
+    case BUZZ_EVT_OK:
+        buzzer_tone_ms(BUZZ_FREQ_HZ, 120);
+        break;
+    case BUZZ_EVT_DENY:
+        buzzer_tone_ms(2200, 80);
+        buzzer_gap_ms(60);
+        buzzer_tone_ms(2200, 80);
+        break;
+    case BUZZ_EVT_NOTIFY:
+        buzzer_tone_ms(3200, 70);
+        break;
+    case BUZZ_EVT_CANCEL:
+        buzzer_tone_ms(1800, 60);
+        break;
+    case BUZZ_EVT_COMMAND_MODE:
+        buzzer_tone_ms(3000, 55);
+        buzzer_gap_ms(45);
+        buzzer_tone_ms(2200, 75);
+        break;
+    case BUZZ_EVT_READY:
+        buzzer_tone_ms(2000, 45);
+        buzzer_gap_ms(35);
+        buzzer_tone_ms(2600, 45);
+        buzzer_gap_ms(35);
+        buzzer_tone_ms(3200, 70);
+        break;
+    case BUZZ_EVT_PROMPT:
+        buzzer_tone_ms(2400, 45);
+        buzzer_gap_ms(30);
+        buzzer_tone_ms(3000, 55);
+        break;
+    case BUZZ_EVT_ATTENDANCE_OK:
+        buzzer_tone_ms(3200, 30);
+        buzzer_gap_ms(20);
+        buzzer_tone_ms(3600, 35);
+        break;
+    case BUZZ_EVT_ATTENDANCE_UNKNOWN:
+        buzzer_tone_ms(2000, 30);
+        break;
+    case BUZZ_EVT_GO:
+        buzzer_tone_ms(3200, 40);
+        buzzer_gap_ms(35);
+        buzzer_tone_ms(3200, 40);
+        break;
+    case BUZZ_EVT_BUSY:
+        buzzer_tone_ms(2500, 35);
+        break;
+    case BUZZ_EVT_START:
+        buzzer_tone_ms(2600, 90);
+        break;
+    case BUZZ_EVT_DONE:
+        buzzer_tone_ms(2400, 55);
+        buzzer_gap_ms(40);
+        buzzer_tone_ms(2800, 55);
+        buzzer_gap_ms(40);
+        buzzer_tone_ms(3200, 80);
+        break;
+    case BUZZ_EVT_WARN:
+        buzzer_tone_ms(2000, 55);
+        buzzer_gap_ms(50);
+        buzzer_tone_ms(2000, 55);
+        break;
+    case BUZZ_EVT_ERROR:
+        buzzer_tone_ms(1600, 180);
+        buzzer_gap_ms(70);
+        buzzer_tone_ms(1600, 180);
+        buzzer_gap_ms(70);
+        buzzer_tone_ms(1600, 260);
+        break;
+    case BUZZ_EVT_WIFI_CONNECTED:
+        buzzer_tone_ms(2800, 50);
+        buzzer_gap_ms(40);
+        buzzer_tone_ms(3400, 60);
+        break;
+    case BUZZ_EVT_WIFI_DISCONNECTED:
+        buzzer_tone_ms(1800, 130);
+        break;
+    default:
+        break;
     }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) != pdTRUE) {
-        return;
-    }
-    play();
-    xSemaphoreGive(s_lock);
+    buzzer_stop();
 }
 
-#define BUZZER_FN(name, body) \
-    static void name##_play(void) body \
-    void name(void) { buzzer_with_lock(name##_play); }
+static void buzzer_task(void *arg)
+{
+    (void)arg;
+    buzz_evt_t evt;
+
+    for (;;) {
+        if (xQueueReceive(s_q, &evt, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        buzzer_play(evt);
+    }
+}
+
+static void buzzer_post(buzz_evt_t evt)
+{
+    if (s_q == NULL) {
+        return;
+    }
+    (void)xQueueOverwrite(s_q, &evt);
+}
 
 esp_err_t app_buzzer_init(void)
 {
@@ -68,9 +181,9 @@ esp_err_t app_buzzer_init(void)
         return ESP_OK;
     }
 
-    if (s_lock == NULL) {
-        s_lock = xSemaphoreCreateMutex();
-        if (s_lock == NULL) {
+    if (s_q == NULL) {
+        s_q = xQueueCreate(1, sizeof(buzz_evt_t));
+        if (s_q == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }
@@ -101,107 +214,37 @@ esp_err_t app_buzzer_init(void)
         return err;
     }
 
+    static bool task_started;
+    if (!task_started) {
+        BaseType_t ok = xTaskCreate(buzzer_task, "buzzer", 2048, NULL, 4, NULL);
+        if (ok != pdPASS) {
+            return ESP_ERR_NO_MEM;
+        }
+        task_started = true;
+    }
+
     s_ready = true;
     ESP_LOGI(BUZZ_TAG, "passive buzzer on GPIO%d", BUZZ_GPIO);
     return ESP_OK;
 }
 
-BUZZER_FN(app_buzzer_beep_ok, { buzzer_tone_ms(BUZZ_FREQ_HZ, 120); })
-
-BUZZER_FN(app_buzzer_beep_deny,
-          {
-              buzzer_tone_ms(2200, 80);
-              buzzer_gap_ms(60);
-              buzzer_tone_ms(2200, 80);
-          })
-
-BUZZER_FN(app_buzzer_beep_notify, { buzzer_tone_ms(3200, 70); })
-
-BUZZER_FN(app_buzzer_beep_cancel, { buzzer_tone_ms(1800, 60); })
-
-BUZZER_FN(app_buzzer_beep_command_mode,
-          {
-              buzzer_tone_ms(3000, 55);
-              buzzer_gap_ms(45);
-              buzzer_tone_ms(2200, 75);
-          })
-
-BUZZER_FN(app_buzzer_beep_ready,
-          {
-              buzzer_tone_ms(2000, 45);
-              buzzer_gap_ms(35);
-              buzzer_tone_ms(2600, 45);
-              buzzer_gap_ms(35);
-              buzzer_tone_ms(3200, 70);
-          })
-
-BUZZER_FN(app_buzzer_beep_prompt,
-          {
-              buzzer_tone_ms(2400, 45);
-              buzzer_gap_ms(30);
-              buzzer_tone_ms(3000, 55);
-          })
-
-BUZZER_FN(app_buzzer_beep_attendance_ok,
-          {
-              buzzer_tone_ms(3000, 35);
-              buzzer_gap_ms(25);
-              buzzer_tone_ms(3600, 45);
-          })
-
-BUZZER_FN(app_buzzer_beep_attendance_unknown, { buzzer_tone_ms(2000, 40); })
-
-BUZZER_FN(app_buzzer_beep_go,
-          {
-              buzzer_tone_ms(3200, 40);
-              buzzer_gap_ms(35);
-              buzzer_tone_ms(3200, 40);
-          })
-
-BUZZER_FN(app_buzzer_beep_busy, { buzzer_tone_ms(2500, 35); })
-
-BUZZER_FN(app_buzzer_beep_start, { buzzer_tone_ms(2600, 90); })
-
-BUZZER_FN(app_buzzer_beep_done,
-          {
-              buzzer_tone_ms(2400, 55);
-              buzzer_gap_ms(40);
-              buzzer_tone_ms(2800, 55);
-              buzzer_gap_ms(40);
-              buzzer_tone_ms(3200, 80);
-          })
-
-BUZZER_FN(app_buzzer_beep_warn,
-          {
-              buzzer_tone_ms(2000, 55);
-              buzzer_gap_ms(50);
-              buzzer_tone_ms(2000, 55);
-          })
-
-BUZZER_FN(app_buzzer_beep_error,
-          {
-              buzzer_tone_ms(1600, 180);
-              buzzer_gap_ms(70);
-              buzzer_tone_ms(1600, 180);
-              buzzer_gap_ms(70);
-              buzzer_tone_ms(1600, 260);
-          })
-
-static bool s_wifi_connected;
-
-static void app_buzzer_beep_wifi_play(void)
-{
-    if (s_wifi_connected) {
-        buzzer_tone_ms(2800, 50);
-        buzzer_gap_ms(40);
-        buzzer_tone_ms(3400, 60);
-    } else {
-        buzzer_tone_ms(1800, 130);
-    }
-}
+void app_buzzer_beep_ok(void) { buzzer_post(BUZZ_EVT_OK); }
+void app_buzzer_beep_deny(void) { buzzer_post(BUZZ_EVT_DENY); }
+void app_buzzer_beep_notify(void) { buzzer_post(BUZZ_EVT_NOTIFY); }
+void app_buzzer_beep_cancel(void) { buzzer_post(BUZZ_EVT_CANCEL); }
+void app_buzzer_beep_command_mode(void) { buzzer_post(BUZZ_EVT_COMMAND_MODE); }
+void app_buzzer_beep_ready(void) { buzzer_post(BUZZ_EVT_READY); }
+void app_buzzer_beep_prompt(void) { buzzer_post(BUZZ_EVT_PROMPT); }
+void app_buzzer_beep_attendance_ok(void) { buzzer_post(BUZZ_EVT_ATTENDANCE_OK); }
+void app_buzzer_beep_attendance_unknown(void) { buzzer_post(BUZZ_EVT_ATTENDANCE_UNKNOWN); }
+void app_buzzer_beep_go(void) { buzzer_post(BUZZ_EVT_GO); }
+void app_buzzer_beep_busy(void) { buzzer_post(BUZZ_EVT_BUSY); }
+void app_buzzer_beep_start(void) { buzzer_post(BUZZ_EVT_START); }
+void app_buzzer_beep_done(void) { buzzer_post(BUZZ_EVT_DONE); }
+void app_buzzer_beep_warn(void) { buzzer_post(BUZZ_EVT_WARN); }
+void app_buzzer_beep_error(void) { buzzer_post(BUZZ_EVT_ERROR); }
 
 void app_buzzer_beep_wifi(bool connected)
 {
-    s_wifi_connected = connected;
-    buzzer_with_lock(app_buzzer_beep_wifi_play);
+    buzzer_post(connected ? BUZZ_EVT_WIFI_CONNECTED : BUZZ_EVT_WIFI_DISCONNECTED);
 }

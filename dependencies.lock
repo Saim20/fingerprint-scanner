@@ -23,17 +23,9 @@ dependencies:
     source:
       type: idf
     version: 6.0.1
-  tny-robotics/sh1106-esp-idf:
-    component_hash: b7a0cd10a16a249142b400014ad41716fb5420b4b55e08b9693e5911d9949a49
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.0.1
 direct_dependencies:
 - espressif/cjson
 - espressif/esp_websocket_client
-- tny-robotics/sh1106-esp-idf
-manifest_hash: cd22ce966a6d0055cd9909451bbee34d4a209d338469bc6ea8d5e60806174886
+manifest_hash: 9607b0540a736b13f8bfc5423e5a3001d5068f0ff94e4af31b7d033cafed2205
 target: esp32c3
 version: 3.0.0

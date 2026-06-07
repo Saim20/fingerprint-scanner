@@ -71,5 +71,5 @@ int64_t app_cloud_last_command_seq(void);
 /** True when sync carries a command the device has not yet acked. */
 bool app_cloud_has_pending(const app_cloud_sync_t *sync);
 
-/** Label for OLED/serial: external_id, display_name, or "slot N". */
+/** Label for serial logs: external_id, display_name, or "slot N". */
 const char *app_cloud_slot_label(uint16_t fp_slot);

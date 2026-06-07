@@ -21,6 +21,8 @@
 #define RT_WS_BUF 4096
 #define RT_HEARTBEAT_MS 25000
 #define RT_TASK_STACK 10240
+/** mbedtls TLS needs more than the esp_websocket_client default (6144). */
+#define RT_WS_TASK_STACK 10240
 
 static esp_websocket_client_handle_t s_ws;
 static bool s_connected;
@@ -33,6 +35,8 @@ static char s_channel_topic[80];
 static char s_ws_uri[384];
 static app_realtime_command_cb_t s_cmd_cb;
 static void *s_cmd_ctx;
+static int64_t s_last_dispatch_seq;
+static char s_last_dispatch_mode[16];
 
 static void parse_string_field(cJSON *item, char *out, size_t out_len)
 {
@@ -220,8 +224,25 @@ static void handle_device_record(cJSON *record)
 
     merge_sync_fields(&cmd);
 
+    bool pending = cmd.command_seq > app_cloud_last_command_seq();
+    bool new_command = pending && strcmp(cmd.desired_mode, "idle") != 0;
+    bool cancel_command = pending && strcmp(cmd.desired_mode, "idle") == 0;
+    bool duplicate = cmd.command_seq == s_last_dispatch_seq &&
+                     strcmp(cmd.desired_mode, s_last_dispatch_mode) == 0;
+
+    if (!new_command && !cancel_command) {
+        return;
+    }
+    if (duplicate) {
+        return;
+    }
+
     ESP_LOGI(RT_TAG, "push seq=%lld mode=%s slot=%u",
              (long long)cmd.command_seq, cmd.desired_mode, (unsigned)cmd.desired_fp_slot);
+    s_last_dispatch_seq = cmd.command_seq;
+    strncpy(s_last_dispatch_mode, cmd.desired_mode, sizeof(s_last_dispatch_mode) - 1);
+    s_last_dispatch_mode[sizeof(s_last_dispatch_mode) - 1] = '\0';
+
     (void)app_cloud_request_sync();
     s_cmd_cb(&cmd, s_cmd_ctx);
 }
@@ -332,7 +353,9 @@ static esp_err_t ws_start(void)
         .uri = s_ws_uri,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = RT_WS_BUF,
-        .task_stack = 6144,
+        .task_stack = RT_WS_TASK_STACK,
+        .network_timeout_ms = 15000,
+        .reconnect_timeout_ms = 10000,
     };
 
     s_ws = esp_websocket_client_init(&cfg);
@@ -429,5 +452,7 @@ void app_realtime_refresh(void)
     build_channel_topic();
     s_access_token[0] = '\0';
     s_token_expires_at = 0;
+    s_last_dispatch_seq = 0;
+    s_last_dispatch_mode[0] = '\0';
     ws_stop();
 }

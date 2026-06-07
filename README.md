@@ -1,6 +1,6 @@
 # Fingerprint attendance (ESP32-C3 + Supabase)
 
-ESP32-C3 fingerprint scanner with SH1106 OLED, buzzer, local enroll/scan, and optional **Supabase** cloud sync (remote enroll, attendance events, admin web UI).
+ESP32-C3 fingerprint scanner with buzzer feedback, local enroll/scan, and optional **Supabase** cloud sync (remote enroll, attendance events, admin web UI).
 
 ## Cloud stack (same Supabase project)
 
@@ -35,9 +35,9 @@ HTTP sync still runs as fallback (attendance upload, template drift, person name
 ## Hardware
 
 - **MCU:** ESP32-C3 Super Mini (4 MB flash)
-- **Display:** external I2C SH1106 128×64 — SDA GPIO5, SCL GPIO6, 3V3/GND; **4.7 kΩ** pull-ups on SDA/SCL to 3V3 if the module has none
-- **Buzzer:** passive piezo on **GPIO10** (+ to GPIO10, − to GND). PWM via LEDC (~2.7 kHz). Use a **passive** buzzer — an active buzzer that beeps on DC will not work.
-- **Sensor:** fingerprint module on UART (see `app_fingerprint.c`)
+- **Feedback:** passive piezo buzzer on **GPIO10** (+ to GPIO10, − to GND). PWM via LEDC (~2.7 kHz). Use a **passive** buzzer — an active buzzer that beeps on DC will not work.
+- **GO button:** GPIO0 — run pending cloud command from dashboard
+- **Sensor:** fingerprint module on UART (see `app_fingerprint.c` / [`docs/PIN_LAYOUT.md`](docs/PIN_LAYOUT.md))
 
 ### Buzzer sounds
 

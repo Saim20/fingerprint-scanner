@@ -689,8 +689,11 @@ static esp_err_t fp_search_impl(uint16_t *out_id, bool *matched, bool placement_
 
     esp_err_t err = ESP_FAIL;
     esp_err_t last_err = ESP_FAIL;
+    const int search_timeout_ms = placement_delay ? 20000 : 3500;
+    const int retry_ms = placement_delay ? 500 : 80;
+
     for (int try_n = 1; try_n <= max_tries; try_n++) {
-        err = fp_run_cmd_timeout(FP_CMD_SEARCH, 0, 0, 20000, try_n == 1);
+        err = fp_run_cmd_timeout(FP_CMD_SEARCH, 0, 0, search_timeout_ms, try_n == 1);
         last_err = err;
         if (err == ESP_OK) {
             *out_id = s_last_user_id;
@@ -701,7 +704,9 @@ static esp_err_t fp_search_impl(uint16_t *out_id, bool *matched, bool placement_
         if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_TIMEOUT) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(placement_delay ? 500 : 300));
+        if (try_n < max_tries) {
+            vTaskDelay(pdMS_TO_TICKS(retry_ms));
+        }
     }
 
     if (last_err == ESP_ERR_NOT_FOUND || last_err == ESP_ERR_TIMEOUT) {
@@ -723,7 +728,7 @@ esp_err_t app_fp_search(uint16_t *out_id, bool *matched)
 
 esp_err_t app_fp_search_attendance(uint16_t *out_id, bool *matched)
 {
-    return fp_search_impl(out_id, matched, false, 8);
+    return fp_search_impl(out_id, matched, false, 2);
 }
 
 esp_err_t app_fp_delete(uint16_t slot_id)
@@ -886,52 +891,88 @@ uint32_t app_fp_slots_hash(void)
     return fp_slots_hash_locked();
 }
 
-esp_err_t app_fp_slots_rebuild_registry(void)
+esp_err_t app_fp_slots_reconcile_with_hints(uint8_t module_count, const uint16_t *hints,
+                                            size_t hint_count)
 {
     if (!s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(120000)) != pdTRUE) {
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(30000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
     fp_refresh_count_locked();
     uint8_t target = s_stored_count;
+    if (module_count != target) {
+        target = module_count;
+    }
 
     memset(s_slot_bitmap, 0, sizeof(s_slot_bitmap));
     s_slot_bitmap_loaded = true;
 
-    uint8_t marked = 0;
-    /* Cap scan window — probing all 150 slots can block for minutes on empty modules. */
-    uint16_t max_slot = APP_FP_MAX_USER_ID;
-    if (target > 0) {
-        uint32_t window = (uint32_t)target * 15u + 10u;
-        if (window > APP_FP_MAX_SLOTS) {
-            window = APP_FP_MAX_SLOTS;
-        }
-        max_slot = (uint16_t)(APP_FP_MIN_USER_ID + window - 1u);
-        if (max_slot > APP_FP_MAX_USER_ID) {
-            max_slot = APP_FP_MAX_USER_ID;
+    if (target == 0) {
+        (void)fp_reg_save();
+        xSemaphoreGive(s_lock);
+        ESP_LOGI(FP_TAG, "slot registry cleared (module empty)");
+        return ESP_OK;
+    }
+
+    uint16_t slots[APP_FP_MAX_SLOTS];
+    bool used[APP_FP_MAX_SLOTS];
+    memset(used, 0, sizeof(used));
+    size_t n = 0;
+
+    if (hints != NULL) {
+        for (size_t i = 0; i < hint_count && n < (size_t)target; i++) {
+            uint16_t slot = hints[i];
+            if (slot < APP_FP_MIN_USER_ID || slot > APP_FP_MAX_USER_ID) {
+                continue;
+            }
+            uint16_t bit = (uint16_t)(slot - APP_FP_MIN_USER_ID);
+            if (used[bit]) {
+                continue;
+            }
+            used[bit] = true;
+            slots[n++] = slot;
         }
     }
 
-    for (uint16_t slot = APP_FP_MIN_USER_ID; slot <= max_slot; slot++) {
-        if (target > 0 && marked >= target) {
-            break;
+    for (uint16_t slot = APP_FP_MIN_USER_ID; n < (size_t)target && slot <= APP_FP_MAX_USER_ID;
+         slot++) {
+        uint16_t bit = (uint16_t)(slot - APP_FP_MIN_USER_ID);
+        if (used[bit]) {
+            continue;
         }
-        if (fp_slot_occupied_probe_locked(slot)) {
-            fp_slot_set_locked(slot, true);
-            marked++;
-        }
-        vTaskDelay(pdMS_TO_TICKS(15));
+        used[bit] = true;
+        slots[n++] = slot;
+    }
+
+    if (n != (size_t)target) {
+        xSemaphoreGive(s_lock);
+        ESP_LOGW(FP_TAG, "slot reconcile failed: filled=%u module=%u hints=%u",
+                 (unsigned)n, (unsigned)target, (unsigned)hint_count);
+        return ESP_FAIL;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        fp_slot_set_locked(slots[i], true);
     }
 
     (void)fp_reg_save();
     fp_refresh_count_locked();
     xSemaphoreGive(s_lock);
-    ESP_LOGI(FP_TAG, "slot registry rebuilt: marked=%u module=%u", (unsigned)marked,
+    ESP_LOGI(FP_TAG, "slot registry reconciled: marked=%u module=%u", (unsigned)n,
              (unsigned)s_stored_count);
     return ESP_OK;
+}
+
+esp_err_t app_fp_slots_rebuild_registry(void)
+{
+    uint8_t count = 0;
+    if (app_fp_get_user_count(&count) != ESP_OK) {
+        count = app_fp_stored_count();
+    }
+    return app_fp_slots_reconcile_with_hints(count, NULL, 0);
 }
 
 bool app_fp_slot_occupied(uint16_t slot_id)

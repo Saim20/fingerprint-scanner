@@ -1,4 +1,3 @@
 dependencies:
   espressif/cjson: "^1.7.18"
   espressif/esp_websocket_client: "^1.7.0"
-  tny-robotics/sh1106-esp-idf: "^1.0.0"
